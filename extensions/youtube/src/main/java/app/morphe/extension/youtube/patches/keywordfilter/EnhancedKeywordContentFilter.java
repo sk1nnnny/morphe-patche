@@ -138,7 +138,7 @@ import app.morphe.extension.youtube.shared.PlayerType;
  * 2) a standalone native card banner at the top of the video description with clickable timestamps.
  */
 @SuppressWarnings({"unused", "unchecked"})
-public final class EnhancedEnhancedKeywordContentFilter extends EnhancedBufferPhraseFilter {
+public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilter {
 
     private static final AtomicBoolean addOnRegistered = new AtomicBoolean();
     private static volatile String browseId = "";
@@ -159,17 +159,17 @@ public final class EnhancedEnhancedKeywordContentFilter extends EnhancedBufferPh
     public static void registerAddOn() {
         if (!addOnRegistered.compareAndSet(false, true)) return;
         KeywordFilterSettings.ensureLoaded();
-        AddOnApi.addVideoIdListener(EnhancedEnhancedKeywordContentFilter::onVideoIdLoaded);
+        AddOnApi.addVideoIdListener(EnhancedKeywordContentFilter::onVideoIdLoaded);
     }
 
     public static Filter[] installFilter(Filter[] filters) {
-        EnhancedEnhancedKeywordContentFilter enhanced = new EnhancedEnhancedKeywordContentFilter();
+        EnhancedKeywordContentFilter enhanced = new EnhancedKeywordContentFilter();
         if (filters == null) {
             return new Filter[]{enhanced};
         }
         for (int i = 0; i < filters.length; i++) {
             Filter f = filters[i];
-            if (f != null && f.getClass().getName().endsWith(".EnhancedKeywordContentFilter")) {
+            if (f != null && f.getClass().getName().endsWith(".KeywordContentFilter")) {
                 filters[i] = enhanced;
                 return filters;
             }
