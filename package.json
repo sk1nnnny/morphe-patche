@@ -3,7 +3,7 @@
   "description": "Yandex voice-over translation add-on for Morphe Patches",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MarcaDian/morphe-patches-yavot.git"
+    "url": "git+https://github.com/sk1nnnny/morphe-patche.git"
   },
   "license": "GPL-3.0",
   "devDependencies": {

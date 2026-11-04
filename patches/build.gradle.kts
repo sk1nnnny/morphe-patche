@@ -2,13 +2,13 @@ group = "app.morphe.thirdparty.yavot"
 
 patches {
     about {
-        name = "Morphe Yandex VoT"
+        name = "Morphe Custom Patches"
         description = "Yandex voice-over translation add-on for Morphe Patches. " +
                 "Requires patching with Morphe official patches"
-        source = "git@github.com:MarcaDian/morphe-patches-yavot.git"
+        source = "git@github.com:sk1nnnny/morphe-patche.git"
         author = "MarcaDian"
         contact = "na"
-        website = "https://github.com/MarcaDian/morphe-patches-yavot"
+        website = "https://github.com/sk1nnnny/morphe-patche"
         license = "GNU General Public License v3.0, with additional GPL section 7 requirements"
     }
 }
