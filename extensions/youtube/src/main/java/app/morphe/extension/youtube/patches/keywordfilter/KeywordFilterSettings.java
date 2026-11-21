@@ -1,4 +1,3 @@
-```java
 package app.morphe.extension.youtube.patches.keywordfilter;
 
 import static app.morphe.extension.shared.settings.Setting.parent;
@@ -57,5 +56,3 @@ public final class KeywordFilterSettings {
     private KeywordFilterSettings() {
     }
 }
-
-```
