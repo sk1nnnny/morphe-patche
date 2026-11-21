@@ -2383,17 +2383,15 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
 
     @Nullable
     private static ProtoNode findRangeMessageOwner(ProtoNode run, int originalLength) {
-        // BFS over the run and its shallow sub-messages (e.g. DecorationRun -> TextDecorator ->
-        // HighlightTextDecorator) matching Morphe's OriginalDescription range lookup, while also
-        // supporting proto3-omitted start_index == 0 and zero-length AttachmentRuns.
+        // Pass 1: BFS across all sub-messages (including 9-digit TextDecorator extensions inside
+        // DecorationRun, matching Morphe's OriginalDescription.findRangeMessage) for an explicit
+        // start_index varint (field 1).
+        ProtoNode omittedStartCandidate = null;
         Queue<ProtoNode> queue = new ArrayDeque<>();
-        Queue<Integer> depths = new ArrayDeque<>();
         queue.add(run);
-        depths.add(0);
 
         while (!queue.isEmpty()) {
             ProtoNode current = queue.remove();
-            int depth = depths.remove();
             List<ProtoNode> fields = current.children;
             if (fields == null) {
                 continue;
@@ -2411,27 +2409,27 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                         return current;
                     }
                 }
-            } else if (lenVal != null && lenVal > 0) {
-                if (current == run) {
-                    return current;
-                }
-                if (lenVal <= originalLength) {
-                    return current;
+            } else if (omittedStartCandidate == null && startNode == null && lenVal != null && lenVal > 0) {
+                // Proto3 omits start_index when it is 0. Remember the closest valid candidate
+                // as Pass 2 fallback only if no explicit start_index exists in any sub-message.
+                if (current == run || lenVal <= originalLength) {
+                    omittedStartCandidate = current;
                 }
             }
 
-            if (depth >= 3) {
-                continue;
-            }
             for (int i = 0, size = fields.size(); i < size; i++) {
                 ProtoNode child = fields.get(i);
-                if (child.children != null && child.getFieldNumber() <= 20) {
-                    queue.add(child);
-                    depths.add(depth + 1);
+                if (child.children != null) {
+                    int fn = child.getFieldNumber();
+                    if (fn != INNERTUBE_COMMAND_FIELD_NUMBER
+                            && fn != LOGGING_DIRECTIVES_FIELD_NUMBER
+                            && fn != RENDERER_CONTEXT_FIELD_NUMBER) {
+                        queue.add(child);
+                    }
                 }
             }
         }
-        return null;
+        return omittedStartCandidate;
     }
 
     @Nullable
