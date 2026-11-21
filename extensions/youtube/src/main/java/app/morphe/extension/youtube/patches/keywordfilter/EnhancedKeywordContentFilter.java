@@ -1660,9 +1660,18 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
     }
 
+    private static String getSubtitleLanguageMode() {
+        String mode = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_SUBTITLES_LANGUAGE.get();
+        if (mode == null || mode.isEmpty()) {
+            return "original";
+        }
+        return mode.trim().toLowerCase(Locale.ROOT);
+    }
+
     private static SubtitleScanState ensureSubtitleScanStarted(String videoId, int rulesVer,
                                                                List<KeywordRule> rules) {
-        String cacheKey = videoId + "|" + rulesVer;
+        String langMode = getSubtitleLanguageMode();
+        String cacheKey = videoId + "|" + rulesVer + "|" + langMode;
         synchronized (subtitleScanCache) {
             SubtitleScanState existing = subtitleScanCache.get(cacheKey);
             if (existing != null) {
@@ -2053,7 +2062,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         if (videoId == null || videoId.isEmpty()) {
             return null;
         }
-        return subtitleScanCache.get(videoId + "|" + filter.currentRulesVersion);
+        return subtitleScanCache.get(videoId + "|" + filter.currentRulesVersion + "|" + getSubtitleLanguageMode());
     }
 
     /**
@@ -2861,8 +2870,13 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
 
     private record SubtitleLine(long startMs, String text) {}
 
+    private record CaptionTrackInfo(String baseUrl, String lang, boolean isAsr, boolean isGemini) {}
+
     private static List<SubtitleLine> fetchSubtitleLines(String videoId) {
         Utils.verifyOffMainThread();
+        final String langMode = getSubtitleLanguageMode();
+        final String appLang = getAppLanguageCode();
+
         // 1. Try ANDROID_VR client first (does not require poToken) and ANDROID client with auth
         String[][] clients = {
                 {"ANDROID_VR", "1.60.19", "28", "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12; en_US; Quest 2) gzip"},
@@ -2870,7 +2884,8 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         };
         for (String[] client : clients) {
             try {
-                String[] innertube = fetchCaptionUrlFromInnertube(videoId, client[0], client[1], client[2], client[3]);
+                String[] innertube = fetchCaptionUrlFromInnertube(
+                        videoId, client[0], client[1], client[2], client[3], langMode, appLang);
                 String captionUrl = innertube[0];
                 String poToken = innertube[1];
                 if (captionUrl != null) {
@@ -2887,7 +2902,8 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             }
         }
 
-        for (String lang : List.of("ru", "en", "en-US", "uk")) {
+        List<String> fallbackLangs = buildTimedTextFallbackLanguages(langMode, appLang);
+        for (String lang : fallbackLangs) {
             try {
                 String url = "https://www.youtube.com/api/timedtext?v=" + videoId
                         + "&lang=" + lang + "&kind=asr&fmt=json3";
@@ -2904,11 +2920,54 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         return Collections.emptyList();
     }
 
+    private static List<String> buildTimedTextFallbackLanguages(String langMode, String appLang) {
+        List<String> langs = new ArrayList<>();
+        if (!"original".equals(langMode) && !"app".equals(langMode) && !langMode.isEmpty()) {
+            langs.add(langMode);
+        }
+        if (!appLang.isEmpty() && !langs.contains(appLang)) {
+            langs.add(appLang);
+        }
+        for (String def : List.of("ru", "en", "en-US", "uk")) {
+            if (!langs.contains(def)) {
+                langs.add(def);
+            }
+        }
+        return langs;
+    }
+
+    private static String getAppLanguageCode() {
+        try {
+            Context ctx = Utils.getContext();
+            if (ctx != null) {
+                Locale locale = ctx.getResources().getConfiguration().getLocales().get(0);
+                if (locale != null && !locale.getLanguage().isEmpty()) {
+                    return normalizeLangCode(locale.getLanguage());
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return normalizeLangCode(Locale.getDefault().getLanguage());
+    }
+
+    private static String normalizeLangCode(@Nullable String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return "";
+        }
+        String lower = raw.trim().toLowerCase(Locale.ROOT);
+        int sep = lower.indexOf('-');
+        if (sep < 0) sep = lower.indexOf('_');
+        return sep > 0 ? lower.substring(0, sep) : lower;
+    }
+
     private static String[] fetchCaptionUrlFromInnertube(String videoId, String clientName,
                                                          String clientVersion, String clientIdHeader,
-                                                         String userAgent) throws Exception {
+                                                         String userAgent, String langMode,
+                                                         String appLang) throws Exception {
+        String hl = appLang.isEmpty() ? "en" : appLang;
         String body = "{\"context\":{\"client\":{\"clientName\":\"" + clientName + "\","
-                + "\"clientVersion\":\"" + clientVersion + "\"}},"
+                + "\"clientVersion\":\"" + clientVersion + "\","
+                + "\"hl\":\"" + hl + "\"}},"
                 + "\"videoId\":\"" + videoId + "\"}";
 
         HttpURLConnection conn = Requester.openConnection(INNERTUBE_PLAYER_URL);
@@ -2938,7 +2997,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
 
         String response = Requester.parseString(conn);
-        return new String[]{selectBestCaptionTrackUrl(response), extractPoToken(response)};
+        return new String[]{selectBestCaptionTrackUrl(response, langMode, appLang), extractPoToken(response)};
     }
 
     @Nullable
@@ -2951,49 +3010,146 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     }
 
     @Nullable
-    private static String selectBestCaptionTrackUrl(String json) {
-        int tracksIdx = json.indexOf("\"captionTracks\":[");
-        if (tracksIdx < 0) return null;
-
-        String preferredLang = Locale.getDefault().getLanguage().toLowerCase(Locale.ROOT);
-        String firstUrl = null;
-        String firstNonGemini = null;
-        String preferredLangUrl = null;
-        String ruUrl = null;
-        int searchFrom = tracksIdx;
-
-        while (true) {
-            int baseUrlIdx = json.indexOf("\"baseUrl\":\"", searchFrom);
-            if (baseUrlIdx < 0 || baseUrlIdx > tracksIdx + 50_000) break;
-            baseUrlIdx += "\"baseUrl\":\"".length();
-
-            int endIdx = json.indexOf('"', baseUrlIdx);
-            if (endIdx < 0) break;
-
-            String url = json.substring(baseUrlIdx, endIdx)
-                    .replace("\\u0026", "&")
-                    .replace("\\u003d", "=")
-                    .replace("\\u003e", ">")
-                    .replace("\\u003c", "<");
-
-            if (firstUrl == null) firstUrl = url;
-            boolean nonGemini = !url.contains("variant=gemini");
-            if (firstNonGemini == null && nonGemini) firstNonGemini = url;
-
-            String urlLang = extractLangParam(url).split("-")[0].toLowerCase(Locale.ROOT);
-            if (preferredLangUrl == null && nonGemini && preferredLang.equals(urlLang)) {
-                preferredLangUrl = url;
-            }
-            if (ruUrl == null && nonGemini && "ru".equals(urlLang)) {
-                ruUrl = url;
+    private static String selectBestCaptionTrackUrl(String json, String langMode, String appLang) {
+        try {
+            JSONObject root = new JSONObject(json);
+            JSONObject captions = root.optJSONObject("captions");
+            JSONObject renderer = captions != null
+                    ? captions.optJSONObject("playerCaptionsTracklistRenderer")
+                    : null;
+            JSONArray tracksArr = renderer != null ? renderer.optJSONArray("captionTracks") : null;
+            if (tracksArr == null || tracksArr.length() == 0) {
+                return null;
             }
 
-            searchFrom = endIdx + 1;
+            List<CaptionTrackInfo> tracks = new ArrayList<>(tracksArr.length());
+            for (int i = 0, len = tracksArr.length(); i < len; i++) {
+                JSONObject obj = tracksArr.optJSONObject(i);
+                if (obj == null) continue;
+                String baseUrl = obj.optString("baseUrl", "");
+                if (baseUrl.isEmpty()) continue;
+
+                String lang = normalizeLangCode(obj.optString("languageCode", ""));
+                if (lang.isEmpty()) {
+                    lang = normalizeLangCode(extractLangParam(baseUrl));
+                }
+                String vssId = obj.optString("vssId", "");
+                String kind = obj.optString("kind", "");
+                boolean isAsr = "asr".equalsIgnoreCase(kind)
+                        || vssId.startsWith("a.")
+                        || baseUrl.contains("kind=asr");
+                boolean isGemini = baseUrl.contains("variant=gemini");
+                tracks.add(new CaptionTrackInfo(baseUrl, lang, isAsr, isGemini));
+            }
+            if (tracks.isEmpty()) {
+                return null;
+            }
+
+            String originalLang = detectOriginalVideoLanguage(root, tracks);
+
+            if ("app".equals(langMode)) {
+                String url = findCaptionTrackForLanguage(tracks, appLang);
+                if (url != null) return url;
+                url = findCaptionTrackForLanguage(tracks, originalLang);
+                if (url != null) return url;
+            } else if (!"original".equals(langMode) && !langMode.isEmpty()) {
+                String url = findCaptionTrackForLanguage(tracks, normalizeLangCode(langMode));
+                if (url != null) return url;
+                url = findCaptionTrackForLanguage(tracks, originalLang);
+                if (url != null) return url;
+                url = findCaptionTrackForLanguage(tracks, appLang);
+                if (url != null) return url;
+            } else {
+                // Default ("original"): always prefer the original spoken language of the video
+                // so a Russian video with English translation uses Russian captions, and an English
+                // video with Russian translation uses English captions.
+                String url = findCaptionTrackForLanguage(tracks, originalLang);
+                if (url != null) return url;
+                url = findCaptionTrackForLanguage(tracks, appLang);
+                if (url != null) return url;
+            }
+
+            // Generic fallback: first non-Gemini manual track, then any non-Gemini, then first track.
+            for (CaptionTrackInfo t : tracks) {
+                if (!t.isGemini() && !t.isAsr()) return t.baseUrl();
+            }
+            for (CaptionTrackInfo t : tracks) {
+                if (!t.isGemini()) return t.baseUrl();
+            }
+            return tracks.get(0).baseUrl();
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "selectBestCaptionTrackUrl JSON parse failed", ex);
+            return null;
+        }
+    }
+
+    @Nullable
+    private static String detectOriginalVideoLanguage(JSONObject playerRoot, List<CaptionTrackInfo> tracks) {
+        // Signal 1: Original audio track in streamingData.adaptiveFormats (multi-audio videos).
+        String defaultAudioLang = null;
+        JSONObject streamingData = playerRoot.optJSONObject("streamingData");
+        JSONArray formats = streamingData != null ? streamingData.optJSONArray("adaptiveFormats") : null;
+        if (formats != null) {
+            for (int i = 0, len = formats.length(); i < len; i++) {
+                JSONObject fmt = formats.optJSONObject(i);
+                if (fmt == null) continue;
+                JSONObject audioTrack = fmt.optJSONObject("audioTrack");
+                if (audioTrack == null) continue;
+                String trackId = audioTrack.optString("id", "");
+                int dot = trackId.indexOf('.');
+                String lang = normalizeLangCode(dot > 0 ? trackId.substring(0, dot) : trackId);
+                if (lang.isEmpty()) continue;
+
+                String displayName = audioTrack.optString("displayName", "").toLowerCase(Locale.ROOT);
+                String xtags = fmt.optString("xtags", "").toLowerCase(Locale.ROOT);
+                if (xtags.contains("acont=original")
+                        || displayName.contains("original")
+                        || displayName.contains("оригинал")) {
+                    return lang;
+                }
+                if (defaultAudioLang == null && audioTrack.optBoolean("audioIsDefault", false)) {
+                    defaultAudioLang = lang;
+                }
+            }
         }
 
-        if (preferredLangUrl != null) return preferredLangUrl;
-        if (ruUrl != null) return ruUrl;
-        return firstNonGemini != null ? firstNonGemini : firstUrl;
+        // Signal 2: ASR track (kind="asr" / vssId="a.XX") is generated from the original spoken audio.
+        for (CaptionTrackInfo t : tracks) {
+            if (t.isAsr() && !t.isGemini() && !t.lang().isEmpty()) {
+                return t.lang();
+            }
+        }
+        for (CaptionTrackInfo t : tracks) {
+            if (t.isAsr() && !t.lang().isEmpty()) {
+                return t.lang();
+            }
+        }
+
+        return defaultAudioLang;
+    }
+
+    @Nullable
+    private static String findCaptionTrackForLanguage(List<CaptionTrackInfo> tracks, @Nullable String targetLang) {
+        if (targetLang == null || targetLang.isEmpty()) {
+            return null;
+        }
+        // Prefer manual non-Gemini captions in the target language over auto-generated ASR.
+        for (CaptionTrackInfo t : tracks) {
+            if (!t.isGemini() && !t.isAsr() && targetLang.equals(t.lang())) {
+                return t.baseUrl();
+            }
+        }
+        for (CaptionTrackInfo t : tracks) {
+            if (!t.isGemini() && targetLang.equals(t.lang())) {
+                return t.baseUrl();
+            }
+        }
+        for (CaptionTrackInfo t : tracks) {
+            if (targetLang.equals(t.lang())) {
+                return t.baseUrl();
+            }
+        }
+        return null;
     }
 
     private static String extractLangParam(String url) {
