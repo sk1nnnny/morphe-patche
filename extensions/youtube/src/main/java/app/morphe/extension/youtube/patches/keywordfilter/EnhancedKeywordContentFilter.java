@@ -193,9 +193,10 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     private static final int TEXT_CONTENT_FIELD_NUMBER = 1;
     private static final int RANGE_START_FIELD_NUMBER = 1;
     private static final int RANGE_LENGTH_FIELD_NUMBER = 2;
-    private static final int STYLE_RUNS_FIELD_NUMBER = 3;
-    private static final int COMMAND_RUNS_FIELD_NUMBER = 4;
-    private static final int ATTACHMENT_RUNS_FIELD_NUMBER = 5;
+    private static final int STYLE_RUNS_FIELD_NUMBER = 5;
+    private static final int COMMAND_RUNS_FIELD_NUMBER = 6;
+    private static final int ATTACHMENT_RUNS_FIELD_NUMBER = 7;
+    private static final int DECORATION_RUNS_FIELD_NUMBER = 8;
     private static final int INNERTUBE_COMMAND_FIELD_NUMBER = 169495254;
     private static final int BROWSE_ENDPOINT_FIELD_NUMBER = 48687626;
     private static final int LOCKUP_METADATA_VIEW_MODEL_FIELD_NUMBER = 8178;
@@ -1171,9 +1172,11 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             if (fn == TEXT_CONTENT_FIELD_NUMBER) {
                 field1Count++;
                 if (field1Count > 1) return false;
-            } else if (fn == STYLE_RUNS_FIELD_NUMBER
+            } else if (fn == 3 || fn == 4
+                    || fn == STYLE_RUNS_FIELD_NUMBER
                     || fn == COMMAND_RUNS_FIELD_NUMBER
-                    || fn == ATTACHMENT_RUNS_FIELD_NUMBER) {
+                    || fn == ATTACHMENT_RUNS_FIELD_NUMBER
+                    || fn == DECORATION_RUNS_FIELD_NUMBER) {
                 hasStyleOrRunField = true;
             }
         }
@@ -1581,7 +1584,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     private static final int SUBTITLE_READ_TIMEOUT_MS = 10_000;
     private static final String INNERTUBE_PLAYER_URL =
             "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
-    private static final int MAX_SUBTITLE_MATCH_ITEMS = 5;
+    private static final int MAX_SUBTITLE_MATCH_ITEMS = 10;
     private static final int MAX_TIMESTAMPS_PER_WORD = 3;
     private static final long MIN_TIMESTAMP_GAP_MS = 20_000L;
     private static final Pattern SUBTITLE_BRACKETS_PATTERN = Pattern.compile("\\[[^]]*]");
@@ -1677,10 +1680,15 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         try {
             List<SubtitleLine> lines = fetchSubtitleLines(videoId);
             if (!lines.isEmpty()) {
-                Map<String, SubtitleMatchItem> byWordKey = new LinkedHashMap<>();
-                Set<String> seenSnippets = new HashSet<>();
+                List<SubtitleMatchItem> itemList = new ArrayList<>();
+                Map<String, Integer> countByWord = new LinkedHashMap<>();
+                Map<String, Long> lastMsByWord = new LinkedHashMap<>();
+                Map<String, Set<String>> seenTsByWord = new LinkedHashMap<>();
 
                 for (int i = 0, size = lines.size(); i < size; i++) {
+                    if (itemList.size() >= MAX_SUBTITLE_MATCH_ITEMS) {
+                        break;
+                    }
                     SubtitleLine line = lines.get(i);
                     String text = line.text;
                     if (text.length() < 2) continue;
@@ -1691,41 +1699,35 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     String wordKey = matchedWord.toLowerCase(Locale.ROOT).trim();
                     if (wordKey.isEmpty()) continue;
 
-                    SubtitleMatchItem existing = byWordKey.get(wordKey);
-                    if (existing != null) {
-                        if (line.startMs - existing.lastTimestampMs >= MIN_TIMESTAMP_GAP_MS
-                                && existing.timestamps.size() < MAX_TIMESTAMPS_PER_WORD) {
-                            String ts = formatTimestamp(line.startMs);
-                            if (!existing.timestamps.contains(ts)) {
-                                existing.timestamps.add(ts);
-                                existing.timestampMsList.add(line.startMs);
-                                existing.lastTimestampMs = line.startMs;
-                            }
-                        }
+                    int wordCount = countByWord.getOrDefault(wordKey, 0);
+                    if (wordCount >= MAX_TIMESTAMPS_PER_WORD) {
+                        continue;
+                    }
+                    Long lastMs = lastMsByWord.get(wordKey);
+                    if (lastMs != null && line.startMs - lastMs < MIN_TIMESTAMP_GAP_MS) {
                         continue;
                     }
 
-                    if (byWordKey.size() >= MAX_SUBTITLE_MATCH_ITEMS) {
+                    String ts = formatTimestamp(line.startMs);
+                    Set<String> seenTs = seenTsByWord.computeIfAbsent(wordKey, k -> new HashSet<>());
+                    if (!seenTs.add(ts)) {
                         continue;
                     }
 
                     String snippet = buildCleanSubtitleSnippet(text, matchedWord, 42);
-                    String snippetKey = snippet.toLowerCase(Locale.ROOT);
-                    if (!seenSnippets.add(snippetKey)) {
-                        continue;
-                    }
-
-                    byWordKey.put(wordKey, new SubtitleMatchItem(
+                    itemList.add(new SubtitleMatchItem(
                             matchedWord,
                             snippet,
-                            formatTimestamp(line.startMs),
+                            ts,
                             line.startMs
                     ));
+                    countByWord.put(wordKey, wordCount + 1);
+                    lastMsByWord.put(wordKey, line.startMs);
                 }
 
-                if (!byWordKey.isEmpty()) {
-                    List<SubtitleMatchItem> itemList = new ArrayList<>(byWordKey.values());
-                    List<ChipSeekPoint> points = new ArrayList<>();
+                if (!itemList.isEmpty()) {
+                    itemList.sort((a, b) -> Long.compare(a.lastTimestampMs, b.lastTimestampMs));
+                    List<ChipSeekPoint> points = new ArrayList<>(itemList.size());
                     for (SubtitleMatchItem item : itemList) {
                         for (int k = 0; k < item.timestamps.size(); k++) {
                             points.add(new ChipSeekPoint(
@@ -2290,8 +2292,6 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         return best;
     }
 
-    private static final int DECORATION_RUNS_FIELD_NUMBER = 8;
-
     private static boolean prependTextAndShiftRuns(List<ProtoNode> textFields, ProtoNode content,
                                                    String prefix) {
         String originalText = content.decodeUtf8();
@@ -2307,79 +2307,127 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             if (run == content || run.children == null) {
                 continue;
             }
-            int fn = run.getFieldNumber();
-            if (fn != STYLE_RUNS_FIELD_NUMBER
-                    && fn != COMMAND_RUNS_FIELD_NUMBER
-                    && fn != ATTACHMENT_RUNS_FIELD_NUMBER
-                    && fn != DECORATION_RUNS_FIELD_NUMBER) {
-                continue;
-            }
-            shiftRunRange(run.children, originalLength, prefixLength,
-                    fn == STYLE_RUNS_FIELD_NUMBER, fn == DECORATION_RUNS_FIELD_NUMBER);
+            shiftRunRange(run, originalLength, prefixLength);
         }
 
         content.setText(prefix + originalText);
         return true;
     }
 
-    private static void shiftRunRange(List<ProtoNode> runFields, int originalLength,
-                                      int prefixLength, boolean isStyleRun, boolean isDecorationRun) {
-        List<ProtoNode> rangeMessage = resolveRunRangeMessage(runFields, originalLength, isDecorationRun);
-        if (rangeMessage == null) {
+    private static void shiftRunRange(ProtoNode run, int originalLength, int prefixLength) {
+        ProtoNode rangeOwner = findRangeMessageOwner(run, originalLength);
+        if (rangeOwner == null || rangeOwner.children == null) {
             return;
         }
+        List<ProtoNode> rangeMessage = rangeOwner.children;
         ProtoNode startNode = ProtoNode.field(rangeMessage, RANGE_START_FIELD_NUMBER);
         ProtoNode lengthNode = ProtoNode.field(rangeMessage, RANGE_LENGTH_FIELD_NUMBER);
-        if (lengthNode == null || lengthNode.getVarint() == null) {
+        Long startVal = startNode != null ? startNode.getVarint() : null;
+        Long lenVal = lengthNode != null ? lengthNode.getVarint() : null;
+        if (startVal == null && lenVal == null) {
             return;
         }
-        long start = (startNode != null && startNode.getVarint() != null) ? startNode.getVarint() : 0L;
-        long len = lengthNode.getVarint();
-        if (start < 0 || len <= 0 || start + len > originalLength) {
+
+        long start = startVal != null ? startVal : 0L;
+        long len = lenVal != null ? lenVal : 0L;
+        if (start < 0 || len < 0 || start > originalLength) {
             return;
         }
 
         // Full-text base StyleRun: keep start = 0 and extend length to cover prefix + originalText
         // so both the subtitle block and the end of the description receive the exact base style.
-        if (isStyleRun && start == 0L && len >= originalLength) {
+        // Exclude CommandRun (field 3/4 sub-messages) and AttachmentRun (field 3 sub-message).
+        boolean isFlatStyleRun = (rangeOwner == run)
+                && hasNoSubMessageField(run.children, 3)
+                && hasNoSubMessageField(run.children, 4);
+        if (isFlatStyleRun && start == 0L && len >= originalLength) {
             if (startNode != null) {
                 startNode.setVarint(0L);
             }
-            lengthNode.setVarint(len + prefixLength);
+            if (lengthNode != null && len < Integer.MAX_VALUE - prefixLength) {
+                lengthNode.setVarint(len + prefixLength);
+            }
             return;
         }
 
-        // All other runs (including runs starting at 0 where start_index was omitted on wire):
+        if (start + len > originalLength) {
+            return;
+        }
+
+        // All other runs (StyleRun, CommandRun, AttachmentRun, DecorationRun, including runs
+        // starting at 0 where start_index was omitted on wire in proto3):
         // shift start_index by +prefixLength and keep length unchanged.
         long shiftedStart = start + prefixLength;
-        if (startNode != null && startNode.getVarint() != null) {
+        if (startVal != null) {
             startNode.setVarint(shiftedStart);
         } else {
             ProtoNode newStart = createVarintNode(RANGE_START_FIELD_NUMBER, shiftedStart);
             if (newStart != null) {
                 rangeMessage.add(0, newStart);
+                // newStart has parent == null, so mark rangeOwner and all ancestors modified
+                // via lengthNode.setVarint(len) so ProtoNode.write() serializes the updated run.
+                lengthNode.setVarint(len);
             }
         }
     }
 
-    @Nullable
-    private static List<ProtoNode> resolveRunRangeMessage(List<ProtoNode> runFields,
-                                                          int originalLength,
-                                                          boolean isDecorationRun) {
-        ProtoNode directLength = ProtoNode.field(runFields, RANGE_LENGTH_FIELD_NUMBER);
-        if (directLength != null && directLength.getVarint() != null) {
-            return runFields;
+    private static boolean hasNoSubMessageField(List<ProtoNode> fields, int fieldNumber) {
+        for (int i = 0, size = fields.size(); i < size; i++) {
+            ProtoNode field = fields.get(i);
+            if (field.getFieldNumber() == fieldNumber && field.children != null) {
+                return false;
+            }
         }
-        if (isDecorationRun) {
-            for (int i = 0, size = runFields.size(); i < size; i++) {
-                List<ProtoNode> child = runFields.get(i).children;
-                if (child == null) continue;
-                ProtoNode lenNode = ProtoNode.field(child, RANGE_LENGTH_FIELD_NUMBER);
-                if (lenNode != null && lenNode.getVarint() != null) {
-                    long len = lenNode.getVarint();
-                    if (len > 0 && len <= originalLength) {
-                        return child;
+        return true;
+    }
+
+    @Nullable
+    private static ProtoNode findRangeMessageOwner(ProtoNode run, int originalLength) {
+        // BFS over the run and its shallow sub-messages (e.g. DecorationRun -> TextDecorator ->
+        // HighlightTextDecorator) matching Morphe's OriginalDescription range lookup, while also
+        // supporting proto3-omitted start_index == 0 and zero-length AttachmentRuns.
+        Queue<ProtoNode> queue = new ArrayDeque<>();
+        Queue<Integer> depths = new ArrayDeque<>();
+        queue.add(run);
+        depths.add(0);
+
+        while (!queue.isEmpty()) {
+            ProtoNode current = queue.remove();
+            int depth = depths.remove();
+            List<ProtoNode> fields = current.children;
+            if (fields == null) {
+                continue;
+            }
+
+            ProtoNode startNode = ProtoNode.field(fields, RANGE_START_FIELD_NUMBER);
+            ProtoNode lengthNode = ProtoNode.field(fields, RANGE_LENGTH_FIELD_NUMBER);
+            Long startVal = startNode != null ? startNode.getVarint() : null;
+            Long lenVal = lengthNode != null ? lengthNode.getVarint() : null;
+
+            if (startVal != null) {
+                long len = lenVal != null ? lenVal : 0L;
+                if (startVal >= 0 && len >= 0 && startVal <= originalLength) {
+                    if (current == run || startVal + len <= originalLength) {
+                        return current;
                     }
+                }
+            } else if (lenVal != null && lenVal > 0) {
+                if (current == run) {
+                    return current;
+                }
+                if (lenVal <= originalLength) {
+                    return current;
+                }
+            }
+
+            if (depth >= 3) {
+                continue;
+            }
+            for (int i = 0, size = fields.size(); i < size; i++) {
+                ProtoNode child = fields.get(i);
+                if (child.children != null && child.getFieldNumber() <= 20) {
+                    queue.add(child);
+                    depths.add(depth + 1);
                 }
             }
         }
@@ -2463,9 +2511,10 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         SubtitleScanState state = getActiveVideoSubtitleState();
         if (state != null && !state.items.isEmpty()) {
             String lowerBanner = bannerSlice.toLowerCase(Locale.ROOT);
+            Set<String> highlightedWords = new HashSet<>();
             for (SubtitleMatchItem item : state.items) {
                 String lowerWord = item.matchedWord.toLowerCase(Locale.ROOT);
-                if (lowerWord.isEmpty()) continue;
+                if (lowerWord.isEmpty() || !highlightedWords.add(lowerWord)) continue;
                 int searchFrom = firstNewline > startIdx ? (firstNewline - startIdx) : 0;
                 while (searchFrom < lowerBanner.length()) {
                     int wIdx = lowerBanner.indexOf(lowerWord, searchFrom);
