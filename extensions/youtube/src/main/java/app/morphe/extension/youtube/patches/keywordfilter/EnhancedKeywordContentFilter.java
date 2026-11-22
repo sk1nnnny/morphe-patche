@@ -984,80 +984,84 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         return isDurationOrBadgeText(t) || SPOKEN_DURATION_PATTERN.matcher(t).matches();
     }
 
-    @Nullable
-    private static String extractAvatarUrlFromBuffer(@Nullable byte[] buffer) {
-        if (buffer == null || buffer.length == 0) return null;
-        try {
-            List<ProtoNode> root = ProtoNode.parse(buffer);
-            if (root == null) return null;
-            List<ProtoNode> textNodes = ProtoNode.textNodes(root);
-            for (int i = 0, size = textNodes.size(); i < size; i++) {
-                String t = textNodes.get(i).getText();
-                if (t.startsWith("https://yt3.ggpht.com/")
-                        || t.startsWith("https://yt3.googleusercontent.com/")) {
-                    return t;
-                }
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
+    private static final Pattern NON_AUTHOR_METADATA_PATTERN = Pattern.compile(
+            "(?i)(?:просмотр|views?|зрител|watching|назад|ago|премьера|premiere|трансляц|streamed|live|нет просмотров|no views)"
+    );
+
+    private static boolean isNonAuthorMetadata(@Nullable String s) {
+        if (s == null || s.isEmpty()) return true;
+        String t = s.trim();
+        if (t.isEmpty() || isSpokenDurationText(t)) return true;
+        if (NON_AUTHOR_METADATA_PATTERN.matcher(t).find()) return true;
+        return Character.isDigit(t.charAt(0)) && t.length() <= 20
+                && (t.contains("тыс") || t.contains("млн") || t.endsWith("K") || t.endsWith("M"));
     }
 
-    @Nullable
-    private static String extractAuthorFromBufferAndTexts(@Nullable byte[] buffer, Source source,
-                                                          List<String> searchableTexts, String titleText) {
-        if (source == Source.COMMENTS) {
-            if (buffer != null && buffer.length > 0) {
-                try {
-                    List<ProtoNode> root = ProtoNode.parse(buffer);
-                    if (root != null) {
-                        List<ProtoNode> textNodes = ProtoNode.textNodes(root);
-                        for (int i = 0, size = textNodes.size(); i < size; i++) {
-                            String t = textNodes.get(i).getText().trim();
-                            if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60
-                                    && !t.contains(" ") && !t.equals(titleText)) {
-                                return t;
-                            }
+    private static String[] extractAuthorAndAvatarSinglePass(@Nullable byte[] buffer, Source source,
+                                                             List<String> searchableTexts, String titleText) {
+        String author = null;
+        String avatar = null;
+
+        if (buffer != null && buffer.length > 0) {
+            try {
+                List<ProtoNode> root = ProtoNode.parse(buffer);
+                if (root != null) {
+                    List<ProtoNode> textNodes = ProtoNode.textNodes(root);
+                    for (int i = 0, size = textNodes.size(); i < size; i++) {
+                        String t = textNodes.get(i).getText().trim();
+                        if (avatar == null && (t.startsWith("https://yt3.ggpht.com/")
+                                || t.startsWith("https://yt3.googleusercontent.com/"))) {
+                            avatar = t;
+                        } else if (source == Source.COMMENTS && author == null
+                                && t.startsWith("@") && t.length() >= 2 && t.length() <= 60
+                                && !t.contains(" ") && !t.equals(titleText)) {
+                            author = t;
+                        }
+                        if (avatar != null && (source != Source.COMMENTS || author != null)) {
+                            break;
                         }
                     }
-                } catch (Exception ignored) {
                 }
+            } catch (Exception ignored) {
             }
-            for (int i = 0, size = searchableTexts.size(); i < size; i++) {
-                String t = searchableTexts.get(i).trim();
-                if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60 && !t.equals(titleText)) {
-                    return t;
-                }
-            }
-            return null;
         }
 
-        // For videos: look for metadata line ("ChannelName · 12 тыс. просмотров · ...") or @handle
+        if (source == Source.COMMENTS) {
+            if (author == null) {
+                for (int i = 0, size = searchableTexts.size(); i < size; i++) {
+                    String t = searchableTexts.get(i).trim();
+                    if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60 && !t.equals(titleText)) {
+                        author = t;
+                        break;
+                    }
+                }
+            }
+            return new String[]{author, avatar};
+        }
+
         for (int i = 0, size = searchableTexts.size(); i < size; i++) {
             String t = searchableTexts.get(i).trim();
             if (t.isEmpty() || t.equals(titleText) || isSpokenDurationText(t)) continue;
             int sep = t.indexOf(" · ");
+            if (sep <= 0) sep = t.indexOf(" • ");
             if (sep > 0) {
                 String candidate = t.substring(0, sep).trim();
-                if (!candidate.isEmpty() && !candidate.equals(titleText) && !isSpokenDurationText(candidate)) {
-                    return candidate;
-                }
-            }
-            int bullet = t.indexOf(" • ");
-            if (bullet > 0) {
-                String candidate = t.substring(0, bullet).trim();
-                if (!candidate.isEmpty() && !candidate.equals(titleText) && !isSpokenDurationText(candidate)) {
-                    return candidate;
+                if (!candidate.equals(titleText) && !isNonAuthorMetadata(candidate)) {
+                    author = candidate;
+                    break;
                 }
             }
         }
-        for (int i = 0, size = searchableTexts.size(); i < size; i++) {
-            String t = searchableTexts.get(i).trim();
-            if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60 && !t.equals(titleText)) {
-                return t;
+        if (author == null) {
+            for (int i = 0, size = searchableTexts.size(); i < size; i++) {
+                String t = searchableTexts.get(i).trim();
+                if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60 && !t.equals(titleText)) {
+                    author = t;
+                    break;
+                }
             }
         }
-        return null;
+        return new String[]{author, avatar};
     }
 
     @Nullable
@@ -1077,22 +1081,20 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     debugMatchedTextMap.put(detail.matchedText(), detail);
                 }
 
-                // Pick the cleanest primary title/comment text (never prepend spoken duration or [componentName])
                 String cleanTitle = primary.matchedText().trim();
-                if (source != Source.COMMENTS && isSpokenDurationText(cleanTitle)) {
+                if (source != Source.COMMENTS && isNonAuthorMetadata(cleanTitle)) {
                     for (int k = 0, sSize = searchableTexts.size(); k < sSize; k++) {
                         String cand = searchableTexts.get(k).trim();
-                        if (!cand.isEmpty() && !isSpokenDurationText(cand)) {
+                        if (!cand.isEmpty() && !isNonAuthorMetadata(cand)) {
                             cleanTitle = cand;
                             break;
                         }
                     }
                 }
 
-                String authorName = extractAuthorFromBufferAndTexts(buffer, source, searchableTexts, cleanTitle);
-                String avatarUrl = extractAvatarUrlFromBuffer(buffer);
+                String[] meta = extractAuthorAndAvatarSinglePass(buffer, source, searchableTexts, cleanTitle);
                 recordMatchLog(source, primary.matchedWord(), cleanTitle,
-                        rule.displayRule, videoId, debug, authorName, avatarUrl);
+                        rule.displayRule, videoId, debug, meta[0], meta[1]);
                 recordHide(source, videoId, cleanTitle);
                 return primary.matchedWord();
             }
@@ -1183,21 +1185,34 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                 + " | Text: '" + matchedText + "'"
                 + " | Source: " + source);
 
-        String dedupId = (videoId != null && !videoId.isEmpty() && source != Source.COMMENTS)
-                ? videoId
-                : matchedText;
-        String dedupKey = source + "|" + dedupId + "|" + matchedWord;
+        final boolean hasValidVideoId = videoId != null && videoId.length() == 11 && source != Source.COMMENTS;
+        final String normTitle = matchedText != null ? matchedText.trim().toLowerCase(Locale.ROOT) : "";
+        final String normWord = matchedWord != null ? matchedWord.trim().toLowerCase(Locale.ROOT) : "";
+
         synchronized (recentMatchLogs) {
-            if (!recentLoggedKeys.add(dedupKey)) {
-                return;
+            MatchLogEntry existingToReplace = null;
+            for (MatchLogEntry existing : recentMatchLogs) {
+                boolean sameVideo = hasValidVideoId && videoId.equals(existing.videoId());
+                boolean sameTitle = !normTitle.isEmpty()
+                        && normTitle.equals(existing.matchedText().trim().toLowerCase(Locale.ROOT))
+                        && normWord.equals(existing.matchedWord().trim().toLowerCase(Locale.ROOT));
+                if (sameVideo) {
+                    return;
+                }
+                if (sameTitle) {
+                    boolean existingHasVideo = existing.videoId() != null && existing.videoId().length() == 11;
+                    if (existingHasVideo || !hasValidVideoId) {
+                        return;
+                    }
+                    existingToReplace = existing;
+                    break;
+                }
             }
-            if (recentMatchLogs.size() >= MAX_MATCH_LOG_ENTRIES) {
-                MatchLogEntry removed = recentMatchLogs.removeLast();
-                String remId = (removed.videoId() != null && !removed.videoId().isEmpty() && removed.source() != Source.COMMENTS)
-                        ? removed.videoId()
-                        : removed.matchedText();
-                String removedKey = removed.source() + "|" + remId + "|" + removed.matchedWord();
-                recentLoggedKeys.remove(removedKey);
+            if (existingToReplace != null) {
+                recentMatchLogs.remove(existingToReplace);
+            }
+            while (recentMatchLogs.size() >= MAX_MATCH_LOG_ENTRIES) {
+                recentMatchLogs.removeLast();
             }
             recentMatchLogs.addFirst(new MatchLogEntry(
                     System.currentTimeMillis(),
@@ -1205,7 +1220,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     matchedWord,
                     matchedText,
                     ruleDisplay,
-                    videoId,
+                    hasValidVideoId ? videoId : null,
                     debugMode,
                     authorName,
                     avatarUrl
@@ -3431,9 +3446,8 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                 return original;
             }
 
-            if (recorded == null) {
-                recordMatchLog(Source.HOME, matchedWord, cleaned, matchedRuleDisplay, null, true, null, null);
-            }
+            // Do not insert duplicate videoId-less log entries from onLithoTextLoaded;
+            // evaluateRulesAndRecord already records the full video/comment metadata.
 
             SpannableStringBuilder builder = new SpannableStringBuilder(original);
             for (int i = 0, size = matchRanges.size(); i < size; i++) {
@@ -3515,7 +3529,8 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             return;
         }
         try {
-            if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_CHECK_SUBTITLES.get()) {
+            if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_CHECK_SUBTITLES.get()
+                    && (host.getTextContent() != null || touchHookedBannerHosts.containsKey(host))) {
                 attachBannerTouchHandlerIfNeeded(host);
             }
             boolean debugEnabled = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get();
@@ -3821,22 +3836,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     }
                 }
             }
-            List<Drawable> drawables = new ArrayList<>();
-            try {
-                findMountedTextDrawables(host, drawables);
-                for (int i = 0, size = drawables.size(); i < size; i++) {
-                    Drawable d = drawables.get(i);
-                    if (d instanceof TextContent tc) {
-                        for (CharSequence item : tc.getTextItems()) {
-                            DebugRuleSpan span = getDebugRuleSpan(item);
-                            if (span != null) {
-                                return span;
-                            }
-                        }
-                    }
-                }
-            } catch (Exception ignored) {
-            }
+
         } else if (view instanceof TextView textView) {
             DebugRuleSpan span = getDebugRuleSpan(textView.getText());
             if (span != null) {
