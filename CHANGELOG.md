@@ -1,3 +1,5 @@
+## [1.0.8-dev.5](https://github.com/sk1nnnny/morphe-patche/compare/v1.0.8-dev.4...v1.0.8-dev.5) (2026-11-22)
+
 ## [1.0.8-dev.4](https://github.com/sk1nnnny/morphe-patche/compare/v1.0.8-dev.3...v1.0.8-dev.4) (2026-11-22)
 
 ## [1.0.8-dev.3](https://github.com/sk1nnnny/morphe-patche/compare/v1.0.8-dev.2...v1.0.8-dev.3) (2026-11-22)
