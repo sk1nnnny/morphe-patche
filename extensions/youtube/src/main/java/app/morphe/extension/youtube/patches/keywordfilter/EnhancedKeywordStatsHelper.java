@@ -270,7 +270,7 @@ public final class EnhancedKeywordStatsHelper {
             LinearLayout footer = new LinearLayout(context);
             footer.setOrientation(LinearLayout.HORIZONTAL);
             footer.setGravity(Gravity.CENTER_VERTICAL);
-            footer.setPadding(Dim.dp12, Dim.dp10, Dim.dp12, Dim.dp14);
+            footer.setPadding(Dim.dp12, Dim.dp10, Dim.dp12, Dim.dp(14));
 
             Button copyBtn = buildActionButton(context, str("morphe_hide_keyword_log_copy"),
                     chipBgColor, fgColor, () -> copyAllLogs(context, logs, timeFormat));
