@@ -63,6 +63,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.WindowManager;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -419,7 +420,10 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     private static final Map<ComponentHost, DebugCardOverlay> debugOverlays = new WeakHashMap<>();
     private static final Map<ComponentHost, Boolean> pendingHostsToUpdate =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<ComponentHost, Boolean> attachHookedDebugHosts =
+            Collections.synchronizedMap(new WeakHashMap<>());
     private static volatile boolean hostsUpdateScheduled;
+    private static volatile boolean lastDebugModeState = false;
 
     /**
      * Represents a single condition within a line (or the entire line when '&' is not used).
@@ -834,12 +838,30 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
 
     @Override
     protected void reparseIfNeeded() {
+        boolean debugNow = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get();
+        if (debugNow != lastDebugModeState) {
+            lastDebugModeState = debugNow;
+            debugMatchedTextMap.clear();
+            commentDecisionsById.clear();
+            if (!debugNow && !debugOverlays.isEmpty()) {
+                Utils.runOnMainThread(EnhancedKeywordContentFilter::detachAllDebugOverlays);
+            }
+        }
         //noinspection StringEquality
         if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_PHRASES.get() != lastKeywordPhrasesParsed
                 || KeywordFilterSettings.HIDE_KEYWORD_CONTENT_USE_AND_OPERATOR.get() != lastUseAndOperator
                 || KeywordFilterSettings.HIDE_KEYWORD_CONTENT_USE_REGEX.get() != lastUseRegex
                 || KeywordFilterSettings.HIDE_KEYWORD_CONTENT_CASE_SENSITIVE.get() != lastCaseSensitive) {
             parseKeywords();
+        }
+    }
+
+    private static void detachAllDebugOverlays() {
+        ComponentHost[] hosts = debugOverlays.keySet().toArray(new ComponentHost[0]);
+        for (ComponentHost host : hosts) {
+            if (host != null) {
+                detachDebugOverlay(host);
+            }
         }
     }
 
@@ -2472,10 +2494,11 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             return;
         }
         int endMarkerIdx = text.indexOf(SUBTITLE_BANNER_END_MARKER, startIdx);
-        if (endMarkerIdx <= startIdx) {
-            return;
-        }
-        final int bannerEnd = endMarkerIdx + SUBTITLE_BANNER_END_MARKER.length();
+        // When the description is collapsed ("...more"), YouTube truncates the text before
+        // SUBTITLE_BANNER_END_MARKER — still style the visible prefix up to text.length().
+        final int bannerEnd = (endMarkerIdx > startIdx)
+                ? endMarkerIdx + SUBTITLE_BANNER_END_MARKER.length()
+                : text.length();
 
         boolean dark = ((ThemeUtils.getAppBackgroundColor() & 0x00FFFFFF) < 0x00808080);
         int primaryColor = dark ? 0xFFF1F1F1 : 0xFF0F0F0F;
@@ -2487,11 +2510,14 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         // 1. Header line: vector CC icon + bold title + secondary count
         int iconStart = startIdx + SUBTITLE_BANNER_START_MARKER.length();
         int firstNewline = text.indexOf('\n', iconStart);
-        if (firstNewline > iconStart + 2) {
+        int headerLineEnd = (firstNewline > iconStart && firstNewline <= bannerEnd)
+                ? firstNewline
+                : bannerEnd;
+        if (headerLineEnd > iconStart + 2) {
             spannable.setSpan(new SubtitleVectorIconSpan(primaryColor),
                     iconStart, iconStart + 2, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             int dotIdx = text.indexOf(" · ", iconStart + 2);
-            int titleEnd = (dotIdx > iconStart + 2 && dotIdx < firstNewline) ? dotIdx : firstNewline;
+            int titleEnd = (dotIdx > iconStart + 2 && dotIdx < headerLineEnd) ? dotIdx : headerLineEnd;
             spannable.setSpan(new ForegroundColorSpan(primaryColor),
                     iconStart + 2, titleEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             spannable.setSpan(new StyleSpan(Typeface.BOLD),
@@ -3394,18 +3420,23 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_CHECK_SUBTITLES.get()) {
                 attachBannerTouchHandlerIfNeeded(host);
             }
-            if (!KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get() && debugOverlays.isEmpty()) {
+            boolean debugEnabled = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get();
+            if (debugEnabled != lastDebugModeState) {
+                lastDebugModeState = debugEnabled;
+                debugMatchedTextMap.clear();
+                commentDecisionsById.clear();
+                if (!debugEnabled && !debugOverlays.isEmpty()) {
+                    Utils.runOnMainThread(EnhancedKeywordContentFilter::detachAllDebugOverlays);
+                }
+            }
+            if (!debugEnabled && debugOverlays.isEmpty()) {
                 return;
             }
             ComponentHost root = findRootHost(host);
             if (root == null) {
                 return;
             }
-            pendingHostsToUpdate.put(root, Boolean.TRUE);
-            if (!hostsUpdateScheduled) {
-                hostsUpdateScheduled = true;
-                Utils.runOnMainThread(updateDebugHostsRunnable);
-            }
+            scheduleDebugHostUpdate(root);
         } catch (Exception ex) {
             Logger.printException(() -> "EnhancedKeywordContentFilter.onComponentHostLayout failure", ex);
         }
@@ -3594,6 +3625,40 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
     }
 
+    private static void scheduleDebugHostUpdate(ComponentHost root) {
+        if (!root.isAttachedToWindow()) {
+            if (attachHookedDebugHosts.put(root, Boolean.TRUE) == null) {
+                root.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                    @Override
+                    public void onViewAttachedToWindow(@NonNull View v) {
+                        if (v instanceof ComponentHost ch) {
+                            attachHookedDebugHosts.remove(ch);
+                            v.removeOnAttachStateChangeListener(this);
+                            ComponentHost r = findRootHost(ch);
+                            if (r != null) {
+                                enqueueDebugHostUpdate(r);
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onViewDetachedFromWindow(@NonNull View v) {
+                    }
+                });
+            }
+            return;
+        }
+        enqueueDebugHostUpdate(root);
+    }
+
+    private static void enqueueDebugHostUpdate(ComponentHost root) {
+        pendingHostsToUpdate.put(root, Boolean.TRUE);
+        if (!hostsUpdateScheduled) {
+            hostsUpdateScheduled = true;
+            Utils.runOnMainThread(updateDebugHostsRunnable);
+        }
+    }
+
     private static final Runnable updateDebugHostsRunnable = () -> {
         hostsUpdateScheduled = false;
         try {
@@ -3601,13 +3666,17 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             pendingHostsToUpdate.clear();
 
             final boolean debugEnabled = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get();
+            if (!debugEnabled) {
+                detachAllDebugOverlays();
+                return;
+            }
             for (ComponentHost root : roots) {
                 if (root == null) continue;
-                if (!debugEnabled) {
-                    detachDebugOverlay(root);
+                if (root.getParent() instanceof ComponentHost) {
                     continue;
                 }
-                if (!root.isAttachedToWindow() || root.getParent() instanceof ComponentHost) {
+                if (!root.isAttachedToWindow()) {
+                    scheduleDebugHostUpdate(root);
                     continue;
                 }
                 if (hasHorizontalScrollingChild(root) || isHostInDialog(root)) {
@@ -3616,6 +3685,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                 }
 
                 DebugRuleSpan matchedSpan = findDebugSpanInViewTree(root);
+                if (matchedSpan == null) {
+                    matchedSpan = matchVisibleTextInViewTreeForDebug(root);
+                }
                 if (matchedSpan != null) {
                     DebugCardOverlay overlay = debugOverlays.get(root);
                     if (overlay == null) {
@@ -3651,6 +3723,22 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     }
                 }
             }
+            List<Drawable> drawables = new ArrayList<>();
+            try {
+                findMountedTextDrawables(host, drawables);
+                for (int i = 0, size = drawables.size(); i < size; i++) {
+                    Drawable d = drawables.get(i);
+                    if (d instanceof TextContent tc) {
+                        for (CharSequence item : tc.getTextItems()) {
+                            DebugRuleSpan span = getDebugRuleSpan(item);
+                            if (span != null) {
+                                return span;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            }
         } else if (view instanceof TextView textView) {
             DebugRuleSpan span = getDebugRuleSpan(textView.getText());
             if (span != null) {
@@ -3672,6 +3760,75 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         return null;
     }
 
+    /**
+     * Fallback for already-mounted cards (when Debug Mode is toggled without restarting) or ROMs
+     * where non-Parcelable marker spans are stripped from mounted text items.
+     */
+    @Nullable
+    private static DebugRuleSpan matchVisibleTextInViewTreeForDebug(View view) {
+        EnhancedKeywordContentFilter filter = instance;
+        if (filter == null) return null;
+        filter.reparseIfNeeded();
+        List<KeywordRule> rules = filter.parsedRules;
+        if (rules.isEmpty()) return null;
+        return findRuleMatchInViewTree(view, rules);
+    }
+
+    @Nullable
+    private static DebugRuleSpan findRuleMatchInViewTree(View view, List<KeywordRule> rules) {
+        if (view instanceof ComponentHost host) {
+            TextContent tc = host.getTextContent();
+            if (tc != null) {
+                for (CharSequence item : tc.getTextItems()) {
+                    DebugRuleSpan match = matchCharSequenceForDebug(item, rules);
+                    if (match != null) return match;
+                }
+            }
+        } else if (view instanceof TextView tv) {
+            DebugRuleSpan match = matchCharSequenceForDebug(tv.getText(), rules);
+            if (match != null) return match;
+        }
+        if (view instanceof ViewGroup group) {
+            for (int i = 0, count = group.getChildCount(); i < count; i++) {
+                View child = group.getChildAt(i);
+                if (child.getVisibility() == View.VISIBLE && !isHorizontalScrollingView(child)) {
+                    DebugRuleSpan found = findRuleMatchInViewTree(child, rules);
+                    if (found != null) return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private static DebugRuleSpan matchCharSequenceForDebug(@Nullable CharSequence text, List<KeywordRule> rules) {
+        if (text == null || text.length() < 2) return null;
+        String raw = text.toString();
+        if (raw.contains(SUBTITLE_BANNER_START_MARKER)) return null;
+        String cleaned = stripFormatCharacters(raw);
+        if (cleaned.length() < 2
+                || isDurationOrBadgeText(cleaned)
+                || COMMENT_UI_LABELS.contains(cleaned.toLowerCase(Locale.ROOT))) {
+            return null;
+        }
+        MatchDetails recorded = debugMatchedTextMap.get(cleaned);
+        if (recorded != null) {
+            return new DebugRuleSpan(recorded.matchedWord(), cleaned, recorded.ruleDisplay(), "");
+        }
+        List<int[]> ranges = new ArrayList<>();
+        for (int i = 0, size = rules.size(); i < size; i++) {
+            KeywordRule rule = rules.get(i);
+            ranges.clear();
+            rule.collectMatchRangesInText(raw, false, ranges);
+            if (!ranges.isEmpty()) {
+                int[] first = ranges.get(0);
+                String word = raw.substring(first[0], first[1]);
+                return new DebugRuleSpan(word, cleaned, rule.displayRule, "");
+            }
+        }
+        return null;
+    }
+
     @Nullable
     private static ComponentHost findRootHost(ComponentHost host) {
         ComponentHost root = host;
@@ -3688,11 +3845,11 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             return false;
         }
         String name = view.getClass().getName();
+        if (name.contains("HorizontalScrollView") || name.contains("ViewPager")) {
+            return true;
+        }
         return name.contains("RecyclerView")
-                || name.contains("HorizontalScrollView")
-                || name.contains("ViewPager")
-                || view.canScrollHorizontally(1)
-                || view.canScrollHorizontally(-1);
+                && (view.canScrollHorizontally(1) || view.canScrollHorizontally(-1));
     }
 
     private static boolean hasHorizontalScrollingChild(ViewGroup group) {
@@ -3707,13 +3864,11 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     }
 
     private static boolean isHostInDialog(ComponentHost host) {
-        Context context = host.getContext();
-        while (context instanceof ContextWrapper wrapper && !(context instanceof Activity)) {
-            context = wrapper.getBaseContext();
-        }
-        if (context instanceof Activity activity && activity.getWindow() != null) {
-            View decorView = activity.getWindow().peekDecorView();
-            if (decorView != null && host.getRootView() != decorView) {
+        View rootView = host.getRootView();
+        if (rootView != null && rootView.getLayoutParams() instanceof WindowManager.LayoutParams lp) {
+            if (lp.type == WindowManager.LayoutParams.TYPE_APPLICATION_PANEL
+                    || lp.type == WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL
+                    || (lp.flags & WindowManager.LayoutParams.FLAG_DIM_BEHIND) != 0) {
                 return true;
             }
         }
@@ -3727,6 +3882,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     private static final class DebugCardOverlay extends Drawable {
         private static final int BORDER_COLOR = 0x99EF5350;
 
+        private final WeakReference<ComponentHost> hostRef;
         private final Paint scrimPaint = new Paint();
         private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint badgeBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -3738,6 +3894,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         private String badgeLabel = "";
 
         DebugCardOverlay(ComponentHost host) {
+            this.hostRef = new WeakReference<>(host);
             density = host.getResources().getDisplayMetrics().density;
             borderPaint.setColor(BORDER_COLOR);
             borderPaint.setStyle(Paint.Style.STROKE);
@@ -3762,19 +3919,29 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                 added = true;
             }
             invalidateSelf();
+            host.invalidate();
         }
 
         void detach(ComponentHost host) {
             if (added) {
                 host.getOverlay().remove(this);
                 added = false;
+                host.invalidate();
             }
         }
 
         @Override
         public void draw(@NonNull Canvas canvas) {
             Rect bounds = getBounds();
-            if (bounds.isEmpty()) return;
+            if (bounds.isEmpty()) {
+                ComponentHost h = hostRef.get();
+                if (h != null && h.getWidth() > 0 && h.getHeight() > 0) {
+                    setBounds(0, 0, h.getWidth(), h.getHeight());
+                    bounds = getBounds();
+                } else {
+                    return;
+                }
+            }
 
             int appBg = ThemeUtils.getAppBackgroundColor() & 0x00FFFFFF;
             scrimPaint.setColor(appBg | 0x9E000000);
