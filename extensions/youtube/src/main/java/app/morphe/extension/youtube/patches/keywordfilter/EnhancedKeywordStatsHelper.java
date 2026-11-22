@@ -53,6 +53,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -77,6 +79,8 @@ public final class EnhancedKeywordStatsHelper {
             Pattern.compile("^\\[[^\\]]+\\]\\s*");
 
     private static final LruCache<String, Bitmap> imageCache = new LruCache<>(80);
+    private static final Map<String, String> channelAvatarCache = new ConcurrentHashMap<>();
+    private static final ExecutorService logIoExecutor = Executors.newFixedThreadPool(4);
 
     private record OEmbedInfo(String title, String authorName) {}
     private static final Map<String, OEmbedInfo> oEmbedCache = new ConcurrentHashMap<>();
@@ -158,6 +162,13 @@ public final class EnhancedKeywordStatsHelper {
                 dialogHolder[0] = dialog;
                 dialog.show();
                 return;
+            }
+
+            for (MatchLogEntry e : logs) {
+                if (e.authorName() != null && !e.authorName().isEmpty()
+                        && e.avatarUrl() != null && !e.avatarUrl().isEmpty()) {
+                    channelAvatarCache.put(e.authorName().trim().toLowerCase(Locale.ROOT), e.avatarUrl());
+                }
             }
 
             // --- Filter chips row ---
@@ -310,6 +321,9 @@ public final class EnhancedKeywordStatsHelper {
         String initialText = stripComponentPrefix(entry.matchedText());
         String initialAuthor = entry.authorName() != null ? entry.authorName().trim() : "";
         String avatarUrl = entry.avatarUrl();
+        if ((avatarUrl == null || avatarUrl.isEmpty()) && !initialAuthor.isEmpty()) {
+            avatarUrl = channelAvatarCache.get(initialAuthor.toLowerCase(Locale.ROOT));
+        }
         String timeStr = timeFormat.format(new Date(entry.timestampMs()));
         String sourceLabel = formatSourceLabel(entry.source(), isRu);
 
@@ -360,7 +374,7 @@ public final class EnhancedKeywordStatsHelper {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             bottomLp.topMargin = Dim.dp10;
 
-            View avatarView = createCircularAvatarView(context, avatarUrl, initialAuthor, Dim.dp24, pillBgColor, fgColor);
+            FrameLayout avatarView = createCircularAvatarView(context, avatarUrl, initialAuthor, Dim.dp24, pillBgColor, fgColor);
             LinearLayout.LayoutParams avLp = new LinearLayout.LayoutParams(Dim.dp24, Dim.dp24);
             avLp.setMarginEnd(Dim.dp8);
             bottomRow.addView(avatarView, avLp);
@@ -402,8 +416,8 @@ public final class EnhancedKeywordStatsHelper {
 
             card.addView(bottomRow, bottomLp);
 
-            // Asynchronously enrich full untruncated video title & exact channel name via YouTube oEmbed
-            enrichVideoWithOEmbedAsync(entry.videoId(), entry.matchedWord(), titleTv, channelTv);
+            // Asynchronously enrich full untruncated video title, exact channel name, and cached channel avatar
+            enrichVideoWithOEmbedAsync(entry.videoId(), entry.matchedWord(), avatarUrl, titleTv, channelTv, avatarView);
 
             // Tap to open video in YouTube
             card.setClickable(true);
@@ -489,8 +503,8 @@ public final class EnhancedKeywordStatsHelper {
         return card;
     }
 
-    private static View createCircularAvatarView(Context context, @Nullable String avatarUrl,
-                                                 String authorName, int sizePx, int bgColor, int fgColor) {
+    private static FrameLayout createCircularAvatarView(Context context, @Nullable String avatarUrl,
+                                                        String authorName, int sizePx, int bgColor, int fgColor) {
         FrameLayout frame = new FrameLayout(context);
         frame.setBackground(roundedRect(bgColor, sizePx / 2f));
         frame.setClipToOutline(true);
@@ -511,11 +525,11 @@ public final class EnhancedKeywordStatsHelper {
         frame.addView(letterTv, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        ImageView iv = new ImageView(context);
+        iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        frame.addView(iv, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         if (avatarUrl != null && !avatarUrl.isEmpty()) {
-            ImageView iv = new ImageView(context);
-            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            frame.addView(iv, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             loadImageAsync(avatarUrl, iv);
         }
         return frame;
@@ -543,14 +557,16 @@ public final class EnhancedKeywordStatsHelper {
     }
 
     private static void enrichVideoWithOEmbedAsync(String videoId, String matchedWord,
-                                                   TextView titleTv, TextView channelTv) {
+                                                   @Nullable String existingAvatarUrl,
+                                                   TextView titleTv, TextView channelTv,
+                                                   FrameLayout avatarFrame) {
         OEmbedInfo cached = oEmbedCache.get(videoId);
         if (cached != null) {
-            applyOEmbedToViews(cached, matchedWord, titleTv, channelTv);
+            applyOEmbedToViews(cached, matchedWord, existingAvatarUrl, titleTv, channelTv, avatarFrame);
             return;
         }
         titleTv.setTag(videoId);
-        Utils.runOnBackgroundThread(() -> {
+        logIoExecutor.execute(() -> {
             try {
                 URL url = new URL("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v="
                         + videoId + "&format=json");
@@ -568,11 +584,15 @@ public final class EnhancedKeywordStatsHelper {
                     String fullTitle = json.optString("title", "").trim();
                     String author = json.optString("author_name", "").trim();
                     if (!fullTitle.isEmpty() || !author.isEmpty()) {
+                        if (!author.isEmpty() && existingAvatarUrl != null && !existingAvatarUrl.isEmpty()) {
+                            channelAvatarCache.put(author.toLowerCase(Locale.ROOT), existingAvatarUrl);
+                        }
                         OEmbedInfo info = new OEmbedInfo(fullTitle, author);
                         oEmbedCache.put(videoId, info);
                         Utils.runOnMainThread(() -> {
                             if (videoId.equals(titleTv.getTag())) {
-                                applyOEmbedToViews(info, matchedWord, titleTv, channelTv);
+                                applyOEmbedToViews(info, matchedWord, existingAvatarUrl,
+                                        titleTv, channelTv, avatarFrame);
                             }
                         });
                     }
@@ -584,13 +604,26 @@ public final class EnhancedKeywordStatsHelper {
     }
 
     private static void applyOEmbedToViews(OEmbedInfo info, String matchedWord,
-                                           TextView titleTv, TextView channelTv) {
+                                           @Nullable String existingAvatarUrl,
+                                           TextView titleTv, TextView channelTv,
+                                           FrameLayout avatarFrame) {
         if (!info.title().isEmpty()) {
             titleTv.setText(buildHighlightedSpannable(info.title(), matchedWord));
         }
         if (!info.authorName().isEmpty()) {
             channelTv.setText(info.authorName());
             channelTv.setVisibility(View.VISIBLE);
+            if (avatarFrame.getChildCount() >= 1 && avatarFrame.getChildAt(0) instanceof TextView letterTv) {
+                letterTv.setText(extractInitial(info.authorName()));
+            }
+            if ((existingAvatarUrl == null || existingAvatarUrl.isEmpty())
+                    && avatarFrame.getChildCount() >= 2
+                    && avatarFrame.getChildAt(1) instanceof ImageView iv) {
+                String cachedAv = channelAvatarCache.get(info.authorName().toLowerCase(Locale.ROOT));
+                if (cachedAv != null && !cachedAv.isEmpty()) {
+                    loadImageAsync(cachedAv, iv);
+                }
+            }
         }
     }
 
@@ -601,7 +634,7 @@ public final class EnhancedKeywordStatsHelper {
             target.setImageBitmap(cached);
             return;
         }
-        Utils.runOnBackgroundThread(() -> {
+        logIoExecutor.execute(() -> {
             try {
                 URL url = new URL(imageUrl);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
