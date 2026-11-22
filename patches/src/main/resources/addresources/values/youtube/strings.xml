@@ -79,6 +79,12 @@
     <string name="morphe_hide_keyword_subtitles_lang_app">App language</string>
     <string name="morphe_hide_keyword_subtitles_lang_ru">Russian</string>
     <string name="morphe_hide_keyword_subtitles_lang_en">English</string>
+    <string name="morphe_hide_keyword_content_hide_ai_title">Hide AI-labeled videos</string>
+    <string name="morphe_hide_keyword_content_hide_ai_summary">Hides and skips videos marked as altered or synthetic content</string>
+    <string name="morphe_hide_keyword_content_shorts_pause_subtitles_title">Pause Shorts on subtitle match</string>
+    <string name="morphe_hide_keyword_content_shorts_pause_subtitles_summary">Pauses Shorts playback and shows an indicator when trigger words are found in subtitles</string>
+    <string name="morphe_hide_keyword_content_shorts_skip_title_title">Skip Shorts on title match</string>
+    <string name="morphe_hide_keyword_content_shorts_skip_title_summary">Automatically skips Shorts when a trigger word matches the title or channel</string>
     <string name="morphe_hide_keyword_debug_badge">[Matched: "%1$s" in %2$s]</string>
     <string name="morphe_hide_keyword_log_title">Filter match log</string>
     <string name="morphe_hide_keyword_log_summary">Entries: %s</string>

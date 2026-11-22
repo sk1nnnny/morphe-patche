@@ -79,6 +79,12 @@
     <string name="morphe_hide_keyword_subtitles_lang_app">Язык приложения</string>
     <string name="morphe_hide_keyword_subtitles_lang_ru">Русский</string>
     <string name="morphe_hide_keyword_subtitles_lang_en">English</string>
+    <string name="morphe_hide_keyword_content_hide_ai_title">Скрывать ролики с меткой ИИ</string>
+    <string name="morphe_hide_keyword_content_hide_ai_summary">Скрывает и пропускает ролики с пометкой «Создано с помощью ИИ»</string>
+    <string name="morphe_hide_keyword_content_shorts_pause_subtitles_title">Пауза Shorts при совпадении в субтитрах</string>
+    <string name="morphe_hide_keyword_content_shorts_pause_subtitles_summary">Останавливает воспроизведение Shorts и показывает индикатор найденных триггеров</string>
+    <string name="morphe_hide_keyword_content_shorts_skip_title_title">Пропускать Shorts с триггером в названии</string>
+    <string name="morphe_hide_keyword_content_shorts_skip_title_summary">Автоматически пропускает Shorts при совпадении в названии или канале</string>
     <string name="morphe_hide_keyword_debug_badge">[Найдено: «%1$s» в %2$s]</string>
     <string name="morphe_hide_keyword_log_title">Журнал срабатываний фильтра</string>
     <string name="morphe_hide_keyword_log_summary">Записей: %s</string>
