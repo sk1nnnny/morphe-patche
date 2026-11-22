@@ -59,7 +59,11 @@ import android.util.SparseArray;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
+import android.media.AudioManager;
+import android.os.SystemClock;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.widget.FrameLayout;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
@@ -80,6 +84,7 @@ import org.json.JSONObject;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
@@ -130,6 +135,8 @@ import app.morphe.extension.youtube.patches.utils.ProtoNode;
 import app.morphe.extension.youtube.settings.Settings;
 import app.morphe.extension.youtube.shared.NavigationBar;
 import app.morphe.extension.youtube.shared.PlayerType;
+import app.morphe.extension.youtube.shared.ShortsPlayerState;
+import app.morphe.extension.youtube.shared.VideoState;
 
 /**
  * Allows hiding or dimming (in debug mode) home feed, subscriptions, search results, and comments
@@ -834,8 +841,13 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     public EnhancedKeywordContentFilter() {
         super();
         instance = this;
-        addPathCallbacks(commentsFilter, commentRepliesFilter);
+        addPathCallbacks(commentsFilter, commentRepliesFilter, shortsOverlayFilter);
         VideoInformation.onVideoIdChange.addObserver(EnhancedKeywordContentFilter::onVideoIdLoaded);
+        ShortsPlayerState.getOnChange().addObserver(isOpen -> {
+            if (!Boolean.TRUE.equals(isOpen)) {
+                Utils.runOnMainThread(EnhancedKeywordContentFilter::dismissShortsAlertBanner);
+            }
+        });
     }
 
     @Override
@@ -954,6 +966,40 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
 
         String videoId = extractVideoIdFromBuffer(buffer);
+        String effectiveVideoId = (videoId != null && !videoId.isEmpty())
+                ? videoId
+                : VideoInformation.getStartingOrPlayingVideoId();
+
+        // Check AI-labeled disclosure in Shorts overlay / feed cards
+        boolean isShortsOverlay = (matchedGroup == shortsOverlayFilter);
+        if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get()) {
+            String aiSignal = detectAiDisclosureInBuffer(buffer, path, accessibility);
+            if (aiSignal != null) {
+                if (effectiveVideoId != null && !effectiveVideoId.isEmpty()) {
+                    onAiLabelDetected(effectiveVideoId, aiSignal, buffer, accessibility);
+                }
+                if (!isShortsOverlay) {
+                    // Feed/channel/search card marked as AI: hide in normal mode, keep in debug mode
+                    List<String> texts = extractSearchableTexts(buffer, accessibility, effectiveVideoId);
+                    String title = texts.isEmpty() ? aiSignal : texts.get(0);
+                    String[] meta = extractAuthorAndAvatarSinglePass(buffer, Source.HOME, texts, title);
+                    recordMatchLog(detectSource(matchedGroup, contextInterface), "ИИ", title,
+                            aiSignal, effectiveVideoId, debug, meta[0], meta[1]);
+                    return "ИИ";
+                }
+            }
+        }
+
+        if (isShortsOverlay) {
+            // Never hide the Shorts player overlay itself via Litho filtering; instead evaluate
+            // Shorts title/handle rules and trigger pause/skip/indicator cleanly.
+            if (effectiveVideoId != null && !effectiveVideoId.isEmpty()) {
+                List<String> overlayTexts = extractSearchableTexts(buffer, accessibility, effectiveVideoId);
+                evaluateShortsMetadataTriggers(effectiveVideoId, overlayTexts, rules, buffer);
+            }
+            return null;
+        }
+
         List<String> searchableTexts = extractSearchableTexts(buffer, accessibility, videoId);
         if (searchableTexts.isEmpty()) {
             return null;
@@ -1738,6 +1784,43 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     private static volatile String activeChipVideoId = "";
     private static volatile int activeChipClickIndex = 0;
 
+    /** Weak reference to Morphe's ReelSequenceController (captured via SkipLiveShortsPatch). */
+    private static volatile WeakReference<Object> shortsSequenceControllerRef = new WeakReference<>(null);
+    private static volatile WeakReference<View> activeShortsBannerRef = new WeakReference<>(null);
+    private static final String SHORTS_BANNER_TAG = "morphe_shorts_keyword_banner";
+    private static volatile String lastPausedShortVideoId = "";
+    private static volatile String lastSkippedShortVideoId = "";
+
+    /** Video IDs detected as having YouTube's AI / synthetic content disclosure label. */
+    private static final Map<String, String> aiLabeledVideoSignals =
+            Collections.synchronizedMap(Utils.createSizeRestrictedMap(120, true));
+
+    private static final Pattern AI_DISCLOSURE_TEXT_PATTERN = Pattern.compile(
+            "(?iu)(?:создано с помощью ии|как это было сделано|измен[её]н или полностью сгенерирован"
+                    + "|altered or synthetic content|how this content was made|digitally generated"
+                    + "|significantly edited or digitally generated|synthetic media)"
+    );
+
+    private static final Pattern AI_DISCLOSURE_JSON_PATTERN = Pattern.compile(
+            "(?i)(?:\"(?:hasSyntheticMedia|isSyntheticMedia|isAlteredOrSynthetic|hasAlteredContent)\"\\s*:\\s*true"
+                    + "|how_this_was_made|altered_content|synthetic_media|altered_or_synthetic"
+                    + "|создано с помощью ии|altered or synthetic content)"
+    );
+
+    private final StringFilterGroup shortsOverlayFilter = new StringFilterGroup(
+            null,
+            "reel_player_overlay",
+            "shorts_video_cell",
+            "how_this_was_made",
+            "altered_content",
+            "synthetic_media",
+            "ai_disclosure"
+    );
+
+    public static void setShortsSequenceController(@Nullable Object controller) {
+        shortsSequenceControllerRef = new WeakReference<>(controller);
+    }
+
     public static final class SubtitleMatchItem {
         public final String matchedWord;
         public final String snippet;
@@ -1763,6 +1846,8 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         volatile boolean pending = true;
         volatile List<SubtitleMatchItem> items = Collections.emptyList();
         volatile List<ChipSeekPoint> seekPoints = Collections.emptyList();
+        volatile String titleMatchedWord = null;
+        volatile String aiDetectedSignal = null;
     }
 
     private static final Map<String, SubtitleScanState> subtitleScanCache =
@@ -1779,16 +1864,21 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             }
             activeChipVideoId = videoId;
             activeChipClickIndex = 0;
-            Utils.runOnMainThread(EnhancedKeywordContentFilter::updatePlayerOverlayChip);
+            Utils.runOnMainThread(() -> {
+                updatePlayerOverlayChip();
+                dismissShortsAlertBanner();
+            });
 
-            if (!KeywordFilterSettings.HIDE_KEYWORD_CONTENT_CHECK_SUBTITLES.get()) {
+            boolean needScan = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_CHECK_SUBTITLES.get()
+                    || (ShortsPlayerState.isOpen() && (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get()
+                    || KeywordFilterSettings.HIDE_KEYWORD_CONTENT_SHORTS_SKIP_TITLE.get()));
+            if (!needScan) {
                 return;
             }
             EnhancedKeywordContentFilter filter = instance;
             if (filter == null) return;
             filter.reparseIfNeeded();
             List<KeywordRule> rules = filter.parsedRules;
-            if (rules.isEmpty()) return;
             ensureSubtitleScanStarted(videoId, filter.currentRulesVersion, rules);
         } catch (Exception ex) {
             Logger.printException(() -> "EnhancedKeywordContentFilter.onVideoIdLoaded failure", ex);
@@ -1891,7 +1981,10 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         } finally {
             state.pending = false;
             state.latch.countDown();
-            Utils.runOnMainThread(EnhancedKeywordContentFilter::updatePlayerOverlayChip);
+            Utils.runOnMainThread(() -> {
+                updatePlayerOverlayChip();
+                handleShortsScanResult(videoId, state);
+            });
         }
     }
 
@@ -2258,6 +2351,13 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             }
             if (videoId.isEmpty()) {
                 return bytes;
+            }
+
+            if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get()) {
+                String descAiSignal = detectAiDisclosureInTextNodes(textNodes);
+                if (descAiSignal != null) {
+                    onAiLabelDetected(videoId, descAiSignal, bytes, null);
+                }
             }
 
             SubtitleScanState state = ensureSubtitleScanStarted(videoId, filter.currentRulesVersion, rules);
@@ -3136,6 +3236,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
 
         String response = Requester.parseString(conn);
+        inspectPlayerJsonForAiAndShortsTitle(videoId, response);
         return new String[]{selectBestCaptionTrackUrl(response, langMode, appLang), extractPoToken(response)};
     }
 
@@ -3494,6 +3595,15 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
         if (path.contains(COMMENT_THREAD_PATH) || path.contains("|comment.e")) {
             return KeywordFilterSettings.HIDE_KEYWORD_CONTENT_COMMENTS.get();
+        }
+        if (ShortsPlayerState.isOpen()
+                && (path.contains("reel_player_overlay")
+                || path.contains("shorts_video_cell")
+                || path.contains("shorts_player")
+                || path.contains("reel_metapanel")
+                || path.contains("shorts_title")
+                || path.contains("channel_bar"))) {
+            return true;
         }
         for (CharSequence prefix : startsWithFilter.filters) {
             if (path.startsWith(prefix.toString())) {
@@ -4083,6 +4193,316 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         @Override
         public int getOpacity() {
             return PixelFormat.TRANSLUCENT;
+        }
+    }
+
+    // endregion
+
+    // region Shorts & AI-Labeled Content Guard (Dev / Debug support)
+
+    @Nullable
+    private static String detectAiDisclosureInBuffer(@Nullable byte[] buffer, @Nullable CharSequence path,
+                                                     @Nullable String accessibility) {
+        if (path != null) {
+            String p = path.toString().toLowerCase(Locale.ROOT);
+            if (p.contains("how_this_was_made") || p.contains("altered_content")
+                    || p.contains("synthetic_media") || p.contains("ai_disclosure")) {
+                return "Метка ИИ";
+            }
+        }
+        if (accessibility != null && !accessibility.isEmpty()) {
+            if (AI_DISCLOSURE_TEXT_PATTERN.matcher(accessibility).find()) {
+                return "Метка ИИ";
+            }
+        }
+        if (buffer != null && buffer.length > 0) {
+            try {
+                List<ProtoNode> root = ProtoNode.parse(buffer);
+                if (root != null) {
+                    return detectAiDisclosureInTextNodes(ProtoNode.textNodes(root));
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private static String detectAiDisclosureInTextNodes(List<ProtoNode> textNodes) {
+        for (int i = 0, size = textNodes.size(); i < size; i++) {
+            String t = textNodes.get(i).getText().trim();
+            if (t.isEmpty()) continue;
+            if (AI_DISCLOSURE_TEXT_PATTERN.matcher(t).find()) {
+                return "Метка ИИ";
+            }
+            // Exact Shorts pill badge text: "ИИ" or "AI" next to info icon in reel_player_overlay
+            if ("ИИ".equals(t) || "AI".equals(t) || "Altered or synthetic".equalsIgnoreCase(t)) {
+                return "Метка ИИ";
+            }
+        }
+        return null;
+    }
+
+    private static void inspectPlayerJsonForAiAndShortsTitle(String videoId, String playerJson) {
+        try {
+            if (playerJson == null || playerJson.isEmpty()) return;
+            EnhancedKeywordContentFilter filter = instance;
+            if (filter == null) return;
+            SubtitleScanState state = subtitleScanCache.get(
+                    videoId + "|" + filter.currentRulesVersion + "|" + getSubtitleLanguageMode());
+
+            // 1. Check AI / synthetic content disclosure in /player JSON
+            if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get()
+                    && AI_DISCLOSURE_JSON_PATTERN.matcher(playerJson).find()) {
+                aiLabeledVideoSignals.put(videoId, "Метка ИИ");
+                if (state != null) {
+                    state.aiDetectedSignal = "Метка ИИ";
+                }
+                Logger.printInfo(() -> "[KeywordFilter] AI label detected in /player JSON for " + videoId);
+            }
+
+            // 2. Check Shorts title & author from videoDetails
+            JSONObject root = new JSONObject(playerJson);
+            JSONObject vd = root.optJSONObject("videoDetails");
+            if (vd != null) {
+                String title = vd.optString("title", "").trim();
+                String author = vd.optString("author", "").trim();
+                List<KeywordRule> rules = filter.parsedRules;
+                if (!rules.isEmpty()) {
+                    List<String> texts = new ArrayList<>(2);
+                    if (!title.isEmpty()) texts.add(title);
+                    if (!author.isEmpty()) texts.add(author);
+                    for (int i = 0, size = rules.size(); i < size; i++) {
+                        List<MatchDetails> matched = rules.get(i).matchAcrossTexts(texts);
+                        if (matched != null && !matched.isEmpty()) {
+                            String word = matched.get(0).matchedWord();
+                            if (state != null) {
+                                state.titleMatchedWord = word;
+                            }
+                            recordMatchLog(Source.HOME, word, !title.isEmpty() ? title : author,
+                                    rules.get(i).displayRule, videoId,
+                                    KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get(),
+                                    !author.isEmpty() ? author : null, null);
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "inspectPlayerJsonForAiAndShortsTitle failure", ex);
+        }
+    }
+
+    private static void onAiLabelDetected(String videoId, String signal,
+                                          @Nullable byte[] buffer, @Nullable String accessibility) {
+        boolean firstTime = (aiLabeledVideoSignals.put(videoId, signal) == null);
+        Logger.printInfo(() -> "[KeywordFilter] AI disclosure detected for " + videoId + ": " + signal);
+        EnhancedKeywordContentFilter filter = instance;
+        if (filter != null) {
+            SubtitleScanState state = subtitleScanCache.get(
+                    videoId + "|" + filter.currentRulesVersion + "|" + getSubtitleLanguageMode());
+            if (state != null) {
+                state.aiDetectedSignal = signal;
+            }
+            if (firstTime && ShortsPlayerState.isOpen() && videoId.equals(activeChipVideoId)) {
+                Utils.runOnMainThread(() -> {
+                    SubtitleScanState cur = getActiveVideoSubtitleState();
+                    if (cur != null) {
+                        handleShortsScanResult(videoId, cur);
+                    } else {
+                        SubtitleScanState tmp = new SubtitleScanState();
+                        tmp.pending = false;
+                        tmp.aiDetectedSignal = signal;
+                        handleShortsScanResult(videoId, tmp);
+                    }
+                });
+            }
+        }
+    }
+
+    private static void evaluateShortsMetadataTriggers(String videoId, List<String> texts,
+                                                       List<KeywordRule> rules, @Nullable byte[] buffer) {
+        if (texts.isEmpty() || rules.isEmpty()) return;
+        for (int i = 0, size = rules.size(); i < size; i++) {
+            List<MatchDetails> matched = rules.get(i).matchAcrossTexts(texts);
+            if (matched != null && !matched.isEmpty()) {
+                String word = matched.get(0).matchedWord();
+                EnhancedKeywordContentFilter filter = instance;
+                if (filter != null) {
+                    SubtitleScanState state = subtitleScanCache.get(
+                            videoId + "|" + filter.currentRulesVersion + "|" + getSubtitleLanguageMode());
+                    if (state != null && state.titleMatchedWord == null) {
+                        state.titleMatchedWord = word;
+                        if (ShortsPlayerState.isOpen() && videoId.equals(activeChipVideoId)) {
+                            Utils.runOnMainThread(() -> handleShortsScanResult(videoId, state));
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    private static void handleShortsScanResult(String videoId, SubtitleScanState state) {
+        try {
+            if (!ShortsPlayerState.isOpen()) {
+                return;
+            }
+            String currentId = VideoInformation.getStartingOrPlayingVideoId();
+            if (currentId.isEmpty()) currentId = activeChipVideoId;
+            if (!videoId.equals(currentId)) {
+                return;
+            }
+
+            final boolean debug = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get();
+            final boolean isRu = Locale.getDefault().getLanguage().equalsIgnoreCase("ru");
+
+            String aiSignal = state.aiDetectedSignal != null
+                    ? state.aiDetectedSignal
+                    : aiLabeledVideoSignals.get(videoId);
+            boolean hasAi = aiSignal != null && KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get();
+            boolean hasTitleTrigger = state.titleMatchedWord != null
+                    && KeywordFilterSettings.HIDE_KEYWORD_CONTENT_SHORTS_SKIP_TITLE.get();
+            boolean hasSubtitleTrigger = !state.items.isEmpty()
+                    && KeywordFilterSettings.HIDE_KEYWORD_CONTENT_SHORTS_PAUSE_SUBTITLES.get();
+
+            if (!hasAi && !hasTitleTrigger && !hasSubtitleTrigger) {
+                return;
+            }
+
+            // Build clean, concise indicator message (no micro-text, no parentheses, no duplicates)
+            List<String> parts = new ArrayList<>();
+            if (hasAi) {
+                parts.add(isRu ? "Метка ИИ" : "AI label");
+            }
+            if (hasTitleTrigger) {
+                parts.add((isRu ? "Название: " : "Title: ") + state.titleMatchedWord);
+            }
+            if (hasSubtitleTrigger) {
+                List<String> subWords = new ArrayList<>();
+                for (SubtitleMatchItem item : state.items) {
+                    String w = item.matchedWord;
+                    if (!subWords.contains(w)) {
+                        subWords.add(w);
+                        if (subWords.size() >= 3) break;
+                    }
+                }
+                parts.add((isRu ? "Субтитры: " : "Subtitles: ") + String.join(", ", subWords));
+            }
+            String bannerText = String.join(" · ", parts);
+
+            // In normal mode (non-debug): skip Short immediately on AI label or title trigger
+            if (!debug && (hasAi || hasTitleTrigger)) {
+                if (!videoId.equals(lastSkippedShortVideoId)) {
+                    lastSkippedShortVideoId = videoId;
+                    if (skipToNextShort()) {
+                        Utils.showToastShort((isRu ? "Пропущен Shorts · " : "Skipped Short · ") + bannerText);
+                        return;
+                    }
+                }
+            }
+
+            // Pause Shorts playback when subtitle triggers hit (or in debug mode / when skip unavailable)
+            if ((hasSubtitleTrigger || hasAi || hasTitleTrigger) && !videoId.equals(lastPausedShortVideoId)) {
+                lastPausedShortVideoId = videoId;
+                pauseCurrentPlayback();
+            }
+
+            showShortsAlertBanner(bannerText, hasAi, debug);
+        } catch (Exception ex) {
+            Logger.printException(() -> "handleShortsScanResult failure", ex);
+        }
+    }
+
+    private static void pauseCurrentPlayback() {
+        try {
+            if (VideoState.getCurrent() != VideoState.PLAYING) {
+                return;
+            }
+            Context ctx = Utils.getContext();
+            if (ctx == null) return;
+            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) {
+                final long now = SystemClock.uptimeMillis();
+                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
+                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
+            }
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "pauseCurrentPlayback failure", ex);
+        }
+    }
+
+    private static boolean skipToNextShort() {
+        try {
+            Object controller = shortsSequenceControllerRef.get();
+            if (controller == null) return false;
+            Method skipMethod = controller.getClass().getMethod("patch_skipToNextShort");
+            skipMethod.invoke(controller);
+            return true;
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "skipToNextShort unavailable", ex);
+            return false;
+        }
+    }
+
+    private static void showShortsAlertBanner(String message, boolean isAi, boolean debug) {
+        try {
+            dismissShortsAlertBanner();
+            Activity activity = Utils.getActivity();
+            if (activity == null || activity.isFinishing()) return;
+            ViewGroup content = activity.findViewById(android.R.id.content);
+            if (content == null) return;
+
+            LinearLayout banner = new LinearLayout(activity);
+            banner.setTag(SHORTS_BANNER_TAG);
+            banner.setOrientation(LinearLayout.HORIZONTAL);
+            banner.setGravity(Gravity.CENTER_VERTICAL);
+            banner.setPadding(Dim.dp12, Dim.dp8, Dim.dp12, Dim.dp8);
+
+            GradientDrawable bg = new GradientDrawable();
+            bg.setShape(GradientDrawable.RECTANGLE);
+            bg.setCornerRadius(Dim.dp(12));
+            bg.setColor(0xE6181818);
+            bg.setStroke(Math.max(2, Dim.dp(1)), isAi ? 0xFFFF9800 : 0xFFEF5350);
+            banner.setBackground(bg);
+            banner.setElevation(Dim.dp8);
+
+            TextView textView = new TextView(activity);
+            textView.setText(message);
+            textView.setTextColor(0xFFFFFFFF);
+            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+            textView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            textView.setMaxLines(2);
+            textView.setEllipsize(TextUtils.TruncateAt.END);
+            banner.addView(textView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            banner.setClickable(true);
+            banner.setOnClickListener(v -> dismissShortsAlertBanner());
+
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.CENTER_HORIZONTAL
+            );
+            lp.topMargin = Dim.dp(92);
+            lp.leftMargin = Dim.dp16;
+            lp.rightMargin = Dim.dp16;
+            content.addView(banner, lp);
+            activeShortsBannerRef = new WeakReference<>(banner);
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "showShortsAlertBanner failure", ex);
+        }
+    }
+
+    private static void dismissShortsAlertBanner() {
+        try {
+            View old = activeShortsBannerRef.get();
+            if (old != null && old.getParent() instanceof ViewGroup parent) {
+                parent.removeView(old);
+            }
+            activeShortsBannerRef = new WeakReference<>(null);
+        } catch (Exception ignored) {
         }
     }
 

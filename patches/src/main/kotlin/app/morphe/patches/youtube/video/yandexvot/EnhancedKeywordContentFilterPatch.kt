@@ -28,6 +28,8 @@ private const val LAYOUT_COMPONENTS_FILTER_CLASS =
     "Lapp/morphe/extension/youtube/patches/components/LayoutComponentsFilter;"
 private const val BASE_KEYWORD_FILTER_CLASS =
     "Lapp/morphe/extension/youtube/patches/components/KeywordContentFilter;"
+private const val SKIP_LIVE_SHORTS_PATCH_CLASS =
+    "Lapp/morphe/extension/youtube/patches/SkipLiveShortsPatch;"
 private const val KEYWORD_STATS_CATEGORY_CLASS =
     "Lapp/morphe/extension/youtube/settings/preference/KeywordContentStatsPreferenceCategory;"
 private const val SOURCE_ENUM_DESCRIPTOR =
@@ -151,6 +153,14 @@ private val enhancedKeywordContentFilterBytecodePatch = bytecodePatch {
             }
         }
 
+        // 3b. Hook SkipLiveShortsPatch.setReelSequenceController so we can skip filtered Shorts natively
+        mutableClassDefByOrNull(SKIP_LIVE_SHORTS_PATCH_CLASS)?.methods
+            ?.firstOrNull { it.name == "setReelSequenceController" && it.parameters.size == 1 }
+            ?.addInstruction(
+                0,
+                "invoke-static { p0 }, $ENHANCED_KEYWORD_FILTER_CLASS->setShortsSequenceController(Ljava/lang/Object;)V"
+            )
+
         // 4. Hook KeywordContentStatsPreferenceCategory.buildRows to show the match log row
         mutableClassDefByOrNull(KEYWORD_STATS_CATEGORY_CLASS)?.methods
             ?.firstOrNull { it.name == "buildRows" && it.parameters.isEmpty() }
@@ -204,6 +214,9 @@ private val enhancedKeywordContentFilterResourcePatch = resourcePatch {
             switchPreference("morphe_hide_keyword_content_channel"),
             switchPreference("morphe_hide_keyword_content_check_subtitles", summary = true),
             listPreference("morphe_hide_keyword_content_subtitles_language"),
+            switchPreference("morphe_hide_keyword_content_hide_ai", summary = true),
+            switchPreference("morphe_hide_keyword_content_shorts_pause_subtitles", summary = true),
+            switchPreference("morphe_hide_keyword_content_shorts_skip_title", summary = true),
             switchPreference("morphe_hide_keyword_content_use_and_operator", summary = true),
             switchPreference("morphe_hide_keyword_content_use_regex", summary = true),
             switchPreference("morphe_hide_keyword_content_case_sensitive", summary = true),

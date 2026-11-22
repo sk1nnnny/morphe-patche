@@ -35,6 +35,13 @@ public final class KeywordFilterSettings {
             "morphe_hide_keyword_content_use_regex", true, false);
     public static final BooleanSetting HIDE_KEYWORD_CONTENT_CASE_SENSITIVE = new BooleanSetting(
             "morphe_hide_keyword_content_case_sensitive", false, false);
+    public static final BooleanSetting HIDE_KEYWORD_CONTENT_HIDE_AI = new BooleanSetting(
+            "morphe_hide_keyword_content_hide_ai", true, false);
+    public static final BooleanSetting HIDE_KEYWORD_CONTENT_SHORTS_PAUSE_SUBTITLES = new BooleanSetting(
+            "morphe_hide_keyword_content_shorts_pause_subtitles", true, false,
+            parent(HIDE_KEYWORD_CONTENT_CHECK_SUBTITLES));
+    public static final BooleanSetting HIDE_KEYWORD_CONTENT_SHORTS_SKIP_TITLE = new BooleanSetting(
+            "morphe_hide_keyword_content_shorts_skip_title", true, false);
     public static final BooleanSetting HIDE_KEYWORD_CONTENT_DEBUG = new BooleanSetting(
             "morphe_hide_keyword_content_debug", false, false);
 
@@ -51,6 +58,9 @@ public final class KeywordFilterSettings {
         HIDE_KEYWORD_CONTENT_USE_AND_OPERATOR.get();
         HIDE_KEYWORD_CONTENT_USE_REGEX.get();
         HIDE_KEYWORD_CONTENT_CASE_SENSITIVE.get();
+        HIDE_KEYWORD_CONTENT_HIDE_AI.get();
+        HIDE_KEYWORD_CONTENT_SHORTS_PAUSE_SUBTITLES.get();
+        HIDE_KEYWORD_CONTENT_SHORTS_SKIP_TITLE.get();
         HIDE_KEYWORD_CONTENT_DEBUG.get();
     }
 
