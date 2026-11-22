@@ -7,6 +7,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -29,6 +30,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -48,6 +50,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.NumberFormat;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
@@ -84,6 +87,23 @@ public final class EnhancedKeywordStatsHelper {
 
     private record OEmbedInfo(String title, String authorName) {}
     private static final Map<String, OEmbedInfo> oEmbedCache = new ConcurrentHashMap<>();
+
+    private static final String EXPORT_PREFS_NAME = "morphe_keyword_log_export";
+    private static final String KEY_EXPORT_TITLE = "export_title";
+    private static final String KEY_EXPORT_AUTHOR = "export_author";
+    private static final String KEY_EXPORT_URL = "export_url";
+    private static final String KEY_EXPORT_TRIGGER = "export_trigger";
+    private static final String KEY_EXPORT_META = "export_meta";
+    private static final String KEY_EXPORT_RULE = "export_rule";
+
+    private record ExportOptions(
+            boolean includeTitle,
+            boolean includeAuthor,
+            boolean includeUrl,
+            boolean includeTrigger,
+            boolean includeMeta,
+            boolean includeRule
+    ) {}
 
     private enum FilterTab {
         ALL, VIDEOS, COMMENTS
@@ -275,7 +295,12 @@ public final class EnhancedKeywordStatsHelper {
             footer.setPadding(Dim.dp12, Dim.dp10, Dim.dp12, Dim.dp(14));
 
             Button copyBtn = buildActionButton(context, str("morphe_hide_keyword_log_copy"),
-                    chipBgColor, fgColor, () -> copyAllLogs(context, logs, timeFormat, isRu));
+                    chipBgColor, fgColor, () -> {
+                        List<MatchLogEntry> filtered = filterLogsByTab(logs, activeTab[0]);
+                        showExportOptionsSheet(context, filtered, timeFormat, isDark,
+                                bgColor, fgColor, cardBgColor, chipBgColor,
+                                chipSelectedBg, chipSelectedText, dividerColor, isRu);
+                    });
             Button clearBtn = buildActionButton(context, str("morphe_hide_keyword_log_clear"),
                     chipBgColor, fgColor, () -> {
                         EnhancedKeywordContentFilter.clearRecentMatchLogs();
@@ -491,7 +516,7 @@ public final class EnhancedKeywordStatsHelper {
 
         // Long-press any card to copy detailed entry
         card.setOnLongClickListener(v -> {
-            String formatted = formatEntryForCopy(entry, timeFormat, isRu);
+            String formatted = formatEntryForCopy(entry, timeFormat, isRu, loadExportOptions(context));
             ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm != null) {
                 cm.setPrimaryClip(ClipData.newPlainText("KeywordFilterEntry", formatted));
@@ -659,12 +684,183 @@ public final class EnhancedKeywordStatsHelper {
         });
     }
 
+    private static List<MatchLogEntry> filterLogsByTab(List<MatchLogEntry> logs, FilterTab tab) {
+        if (tab == FilterTab.ALL) return logs;
+        List<MatchLogEntry> out = new ArrayList<>();
+        for (MatchLogEntry e : logs) {
+            if (tab == FilterTab.VIDEOS && e.source() != Source.COMMENTS) out.add(e);
+            else if (tab == FilterTab.COMMENTS && e.source() == Source.COMMENTS) out.add(e);
+        }
+        return out;
+    }
+
+    private static ExportOptions loadExportOptions(Context context) {
+        SharedPreferences prefs = context.getSharedPreferences(EXPORT_PREFS_NAME, Context.MODE_PRIVATE);
+        return new ExportOptions(
+                prefs.getBoolean(KEY_EXPORT_TITLE, true),
+                prefs.getBoolean(KEY_EXPORT_AUTHOR, true),
+                prefs.getBoolean(KEY_EXPORT_URL, true),
+                prefs.getBoolean(KEY_EXPORT_TRIGGER, true),
+                prefs.getBoolean(KEY_EXPORT_META, true),
+                prefs.getBoolean(KEY_EXPORT_RULE, false)
+        );
+    }
+
+    private static void saveExportOptions(Context context, ExportOptions opts) {
+        context.getSharedPreferences(EXPORT_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_EXPORT_TITLE, opts.includeTitle())
+                .putBoolean(KEY_EXPORT_AUTHOR, opts.includeAuthor())
+                .putBoolean(KEY_EXPORT_URL, opts.includeUrl())
+                .putBoolean(KEY_EXPORT_TRIGGER, opts.includeTrigger())
+                .putBoolean(KEY_EXPORT_META, opts.includeMeta())
+                .putBoolean(KEY_EXPORT_RULE, opts.includeRule())
+                .apply();
+    }
+
+    private static void showExportOptionsSheet(Context context, List<MatchLogEntry> logs,
+                                               SimpleDateFormat timeFormat, boolean isDark,
+                                               int bgColor, int fgColor, int cardBgColor,
+                                               int chipBgColor, int chipSelectedBg,
+                                               int chipSelectedText, int dividerColor, boolean isRu) {
+        ExportOptions saved = loadExportOptions(context);
+        SheetBottomDialog.DraggableLinearLayout layout =
+                SheetBottomDialog.createMainLayout(context, bgColor);
+
+        TextView header = new TextView(context);
+        header.setText(isRu ? "Что копировать" : "Fields to export");
+        header.setTextColor(fgColor);
+        header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f);
+        header.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        header.setPadding(Dim.dp16, Dim.dp12, Dim.dp16, Dim.dp10);
+        layout.addView(header);
+
+        View topDiv = new View(context);
+        topDiv.setBackgroundColor(dividerColor);
+        layout.addView(topDiv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, Dim.dp1)));
+
+        LinearLayout optionsCol = new LinearLayout(context);
+        optionsCol.setOrientation(LinearLayout.VERTICAL);
+        optionsCol.setPadding(Dim.dp12, Dim.dp8, Dim.dp12, Dim.dp8);
+
+        CheckBox cbTitle = addExportOptionRow(context, optionsCol,
+                isRu ? "Название видео и текст комментария" : "Video title & comment text",
+                saved.includeTitle(), fgColor, cardBgColor);
+        CheckBox cbAuthor = addExportOptionRow(context, optionsCol,
+                isRu ? "Канал и автор" : "Channel & author",
+                saved.includeAuthor(), fgColor, cardBgColor);
+        CheckBox cbUrl = addExportOptionRow(context, optionsCol,
+                isRu ? "Ссылка на видео" : "Video link",
+                saved.includeUrl(), fgColor, cardBgColor);
+        CheckBox cbTrigger = addExportOptionRow(context, optionsCol,
+                isRu ? "Слово-триггер" : "Trigger word",
+                saved.includeTrigger(), fgColor, cardBgColor);
+        CheckBox cbMeta = addExportOptionRow(context, optionsCol,
+                isRu ? "Источник и время" : "Source & time",
+                saved.includeMeta(), fgColor, cardBgColor);
+        CheckBox cbRule = addExportOptionRow(context, optionsCol,
+                isRu ? "Полное правило фильтра" : "Full filter rule",
+                saved.includeRule(), fgColor, cardBgColor);
+
+        layout.addView(optionsCol);
+
+        View botDiv = new View(context);
+        botDiv.setBackgroundColor(dividerColor);
+        layout.addView(botDiv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, Dim.dp1)));
+
+        final SheetBottomDialog.SlideDialog[] exportDialogHolder = new SheetBottomDialog.SlideDialog[1];
+
+        LinearLayout footer = new LinearLayout(context);
+        footer.setOrientation(LinearLayout.HORIZONTAL);
+        footer.setGravity(Gravity.CENTER_VERTICAL);
+        footer.setPadding(Dim.dp12, Dim.dp10, Dim.dp12, Dim.dp(14));
+
+        Button cancelBtn = buildActionButton(context, isRu ? "Отмена" : "Cancel",
+                chipBgColor, fgColor, () -> {
+                    if (exportDialogHolder[0] != null) exportDialogHolder[0].dismiss();
+                });
+        Button doCopyBtn = buildActionButton(context, str("morphe_hide_keyword_log_copy"),
+                chipSelectedBg, chipSelectedText, () -> {
+                    ExportOptions chosen = new ExportOptions(
+                            cbTitle.isChecked(),
+                            cbAuthor.isChecked(),
+                            cbUrl.isChecked(),
+                            cbTrigger.isChecked(),
+                            cbMeta.isChecked(),
+                            cbRule.isChecked()
+                    );
+                    if (!chosen.includeTitle() && !chosen.includeAuthor() && !chosen.includeUrl()
+                            && !chosen.includeTrigger() && !chosen.includeMeta() && !chosen.includeRule()) {
+                        Utils.showToastShort(isRu ? "Выберите хотя бы одно поле" : "Select at least one field");
+                        return;
+                    }
+                    saveExportOptions(context, chosen);
+                    copyAllLogs(context, logs, timeFormat, isRu, chosen);
+                    if (exportDialogHolder[0] != null) exportDialogHolder[0].dismiss();
+                });
+
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, Dim.dp40, 1f);
+        lp1.setMarginEnd(Dim.dp8);
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, Dim.dp40, 1.3f);
+        footer.addView(cancelBtn, lp1);
+        footer.addView(doCopyBtn, lp2);
+        layout.addView(footer);
+
+        SheetBottomDialog.SlideDialog dialog = SheetBottomDialog.createSlideDialog(context, layout, 180);
+        exportDialogHolder[0] = dialog;
+        dialog.show();
+    }
+
+    private static CheckBox addExportOptionRow(Context context, LinearLayout parent,
+                                               String label, boolean checked,
+                                               int fgColor, int rowBgColor) {
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(Dim.dp12, Dim.dp8, Dim.dp12, Dim.dp8);
+        row.setBackground(roundedRect(rowBgColor, Dim.dp10));
+        row.setClickable(true);
+        row.setFocusable(true);
+
+        TextView tv = new TextView(context);
+        tv.setText(label);
+        tv.setTextColor(fgColor);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+        row.addView(tv, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        CheckBox cb = new CheckBox(context);
+        cb.setChecked(checked);
+        cb.setClickable(false);
+        cb.setFocusable(false);
+        row.addView(cb);
+
+        row.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = Dim.dp6;
+        parent.addView(row, lp);
+        return cb;
+    }
+
     private static void copyAllLogs(Context context, List<MatchLogEntry> logs,
-                                    SimpleDateFormat timeFormat, boolean isRu) {
+                                    SimpleDateFormat timeFormat, boolean isRu,
+                                    ExportOptions opts) {
         StringBuilder sb = new StringBuilder();
+        int index = 0;
         for (int i = 0, size = logs.size(); i < size; i++) {
-            if (i > 0) sb.append("\n\n");
-            sb.append(i + 1).append(". ").append(formatEntryForCopy(logs.get(i), timeFormat, isRu));
+            String block = formatEntryForCopy(logs.get(i), timeFormat, isRu, opts);
+            if (block.isEmpty()) continue;
+            if (index > 0) sb.append("\n\n");
+            index++;
+            sb.append(index).append(". ").append(block);
+        }
+        if (sb.length() == 0) {
+            Utils.showToastShort(isRu ? "Нет данных для выбранных полей" : "No data for selected fields");
+            return;
         }
         ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
         if (cm != null) {
@@ -673,8 +869,9 @@ public final class EnhancedKeywordStatsHelper {
         }
     }
 
-    private static String formatEntryForCopy(MatchLogEntry entry, SimpleDateFormat timeFormat, boolean isRu) {
-        StringBuilder sb = new StringBuilder();
+    private static String formatEntryForCopy(MatchLogEntry entry, SimpleDateFormat timeFormat,
+                                             boolean isRu, ExportOptions opts) {
+        List<String> lines = new ArrayList<>();
         String timeStr = timeFormat.format(new Date(entry.timestampMs()));
         String sourceLabel = formatSourceLabel(entry.source(), isRu);
         String statusLabel = entry.debugMode()
@@ -691,25 +888,27 @@ public final class EnhancedKeywordStatsHelper {
             }
         }
 
-        sb.append(sourceLabel).append(" · ").append(timeStr).append(" · ").append(statusLabel);
-        sb.append('\n').append(title);
-        if (!author.isEmpty()) {
-            sb.append('\n').append(entry.source() == Source.COMMENTS
+        if (opts.includeMeta()) {
+            lines.add(sourceLabel + " · " + timeStr + " · " + statusLabel);
+        }
+        if (opts.includeTitle() && !title.isEmpty()) {
+            lines.add(title);
+        }
+        if (opts.includeAuthor() && !author.isEmpty()) {
+            lines.add((entry.source() == Source.COMMENTS
                     ? (isRu ? "Автор: " : "Author: ")
-                    : (isRu ? "Канал: " : "Channel: "))
-                    .append(author);
+                    : (isRu ? "Канал: " : "Channel: ")) + author);
         }
-        if (entry.matchedWord() != null && !entry.matchedWord().isEmpty()) {
-            sb.append('\n').append(isRu ? "Триггер: " : "Trigger: ").append(entry.matchedWord());
+        if (opts.includeTrigger() && entry.matchedWord() != null && !entry.matchedWord().isEmpty()) {
+            lines.add((isRu ? "Триггер: " : "Trigger: ") + entry.matchedWord());
         }
-        if (entry.ruleDisplay() != null && !entry.ruleDisplay().isEmpty()
-                && !entry.ruleDisplay().equals(entry.matchedWord())) {
-            sb.append('\n').append(isRu ? "Правило: " : "Rule: ").append(entry.ruleDisplay());
+        if (opts.includeRule() && entry.ruleDisplay() != null && !entry.ruleDisplay().isEmpty()) {
+            lines.add((isRu ? "Правило: " : "Rule: ") + entry.ruleDisplay());
         }
-        if (entry.videoId() != null && entry.videoId().length() == 11) {
-            sb.append("\nhttps://youtu.be/").append(entry.videoId());
+        if (opts.includeUrl() && entry.videoId() != null && entry.videoId().length() == 11) {
+            lines.add("https://youtu.be/" + entry.videoId());
         }
-        return sb.toString();
+        return String.join("\n", lines);
     }
 
     private static TextView createFilterChip(Context context, String label) {
