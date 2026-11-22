@@ -44,6 +44,8 @@ public final class KeywordFilterSettings {
             "morphe_hide_keyword_content_shorts_skip_title", true, false);
     public static final BooleanSetting HIDE_KEYWORD_CONTENT_DEBUG = new BooleanSetting(
             "morphe_hide_keyword_content_debug", false, false);
+    public static final BooleanSetting HIDE_KEYWORD_CONTENT_INSPECTOR = new BooleanSetting(
+            "morphe_hide_keyword_content_inspector", false, false);
 
     public static final LongSetting KEYWORD_HIDE_COUNT_HOME = Settings.KEYWORD_HIDE_COUNT_HOME;
     public static final LongSetting KEYWORD_HIDE_COUNT_SUBSCRIPTIONS = Settings.KEYWORD_HIDE_COUNT_SUBSCRIPTIONS;
@@ -62,6 +64,7 @@ public final class KeywordFilterSettings {
         HIDE_KEYWORD_CONTENT_SHORTS_PAUSE_SUBTITLES.get();
         HIDE_KEYWORD_CONTENT_SHORTS_SKIP_TITLE.get();
         HIDE_KEYWORD_CONTENT_DEBUG.get();
+        HIDE_KEYWORD_CONTENT_INSPECTOR.get();
     }
 
     private KeywordFilterSettings() {

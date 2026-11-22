@@ -97,5 +97,7 @@
     <string name="morphe_hide_keyword_content_about_whole_words_summary">Surrounding a keyword/phrase with double-quotes prevents partial matches inside other words.&lt;br&gt;&lt;br&gt;For example, &lt;b&gt;\"ai\"&lt;/b&gt; hides &lt;b&gt;How does AI work?&lt;/b&gt; but will not hide &lt;b&gt;What does fair use mean?&lt;/b&gt;&lt;br&gt;&lt;br&gt;Use &lt;b&gt;&amp;amp;&lt;/b&gt; on a single line (e.g., &lt;b&gt;\"ai\" &amp;amp; \"news\"&lt;/b&gt;) to require both keywords to match.</string>
     <string name="morphe_hide_keyword_content_about_regex_title">Regular expressions &amp; Debug mode</string>
     <string name="morphe_hide_keyword_content_about_regex_summary">Write regex rules wrapped in slashes &lt;b&gt;/pattern/&lt;/b&gt; (add &lt;b&gt;/c&lt;/b&gt; for case-sensitive, e.g. &lt;b&gt;/\\bAI\\b/c&lt;/b&gt;), prefixed with &lt;b&gt;regex:&lt;/b&gt;, or directly using regex syntax when Regex is enabled.&lt;br&gt;&lt;br&gt;Enable &lt;b&gt;Debug mode&lt;/b&gt; to dim matched cards and see which rule triggered on each video.</string>
+    <string name="morphe_hide_keyword_content_inspector_title">UI Element Inspector</string>
+    <string name="morphe_hide_keyword_content_inspector_summary">Shows a floating pencil button to outline UI elements and copy their ID and Litho path</string>
     <string name="morphe_hide_keyword_toast_invalid_regex">Invalid regex pattern: %s</string>
 </resources>

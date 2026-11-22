@@ -97,5 +97,7 @@
     <string name="morphe_hide_keyword_content_about_whole_words_summary">Заключение слова или фразы в двойные кавычки предотвращает частичное совпадение внутри других слов.&lt;br&gt;&lt;br&gt;Например, &lt;b&gt;\"ии\"&lt;/b&gt; или &lt;b&gt;\"ai\"&lt;/b&gt; скроет &lt;b&gt;Как работает ИИ?&lt;/b&gt;, но не тронет слова &lt;b&gt;России&lt;/b&gt; или &lt;b&gt;fair&lt;/b&gt;.&lt;br&gt;&lt;br&gt;Оператор &lt;b&gt;&amp;amp;&lt;/b&gt; в одной строке (например, &lt;b&gt;\"ии\" &amp;amp; \"новости\"&lt;/b&gt;) требует совпадения всех указанных условий одновременно.</string>
     <string name="morphe_hide_keyword_content_about_regex_title">Регулярные выражения (Regex) и отладка</string>
     <string name="morphe_hide_keyword_content_about_regex_summary">Регулярные выражения можно записывать в слешах &lt;b&gt;/шаблон/&lt;/b&gt; (добавьте &lt;b&gt;/c&lt;/b&gt; для учета регистра: &lt;b&gt;/\\bИИ\\b/c&lt;/b&gt;), с префиксом &lt;b&gt;regex:&lt;/b&gt; или напрямую при включенной опции Regex.&lt;br&gt;&lt;br&gt;При включении &lt;b&gt;Режима отладки&lt;/b&gt; ролики и комментарии не скрываются, а затухают с отображением сработавшего правила.</string>
+    <string name="morphe_hide_keyword_content_inspector_title">Инспектор элементов (UI)</string>
+    <string name="morphe_hide_keyword_content_inspector_summary">Показывает кнопку с карандашом для выделения элементов контуром и копирования их ID и Litho-пути</string>
     <string name="morphe_hide_keyword_toast_invalid_regex">Ошибка в регулярном выражении: %s</string>
 </resources>

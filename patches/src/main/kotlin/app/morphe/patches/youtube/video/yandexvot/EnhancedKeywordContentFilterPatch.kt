@@ -221,6 +221,7 @@ private val enhancedKeywordContentFilterResourcePatch = resourcePatch {
             switchPreference("morphe_hide_keyword_content_use_regex", summary = true),
             switchPreference("morphe_hide_keyword_content_case_sensitive", summary = true),
             switchPreference("morphe_hide_keyword_content_debug", summary = true),
+            switchPreference("morphe_hide_keyword_content_inspector", summary = true),
             afterKey = "morphe_hide_keyword_content_subscriptions",
             screenKey = "morphe_hide_keyword_content_screen",
         )

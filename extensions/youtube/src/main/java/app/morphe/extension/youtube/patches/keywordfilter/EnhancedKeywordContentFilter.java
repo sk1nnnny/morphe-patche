@@ -433,6 +433,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             Collections.synchronizedMap(new WeakHashMap<>());
     private static volatile boolean hostsUpdateScheduled;
     private static volatile boolean lastDebugModeState = false;
+    private static volatile boolean lastInspectorState = false;
 
     /**
      * Represents a single condition within a line (or the entire line when '&' is not used).
@@ -852,6 +853,11 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
 
     @Override
     protected void reparseIfNeeded() {
+        boolean inspectorNow = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_INSPECTOR.get();
+        if (inspectorNow != lastInspectorState) {
+            lastInspectorState = inspectorNow;
+            UiElementInspector.onSettingChanged(inspectorNow);
+        }
         boolean debugNow = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get();
         if (debugNow != lastDebugModeState) {
             lastDebugModeState = debugNow;
@@ -1001,6 +1007,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
 
         List<String> searchableTexts = extractSearchableTexts(buffer, accessibility, videoId);
+        if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_INSPECTOR.get()) {
+            UiElementInspector.recordLithoComponent(extractRootComponentName(path), path, accessibility, searchableTexts);
+        }
         if (searchableTexts.isEmpty()) {
             return null;
         }
@@ -1796,14 +1805,14 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             Collections.synchronizedMap(Utils.createSizeRestrictedMap(120, true));
 
     private static final Pattern AI_DISCLOSURE_TEXT_PATTERN = Pattern.compile(
-            "(?iu)(?:создано с помощью ии|как это было сделано|измен[её]н или полностью сгенерирован"
-                    + "|altered or synthetic content|how this content was made|digitally generated"
-                    + "|significantly edited or digitally generated|synthetic media)"
+            "(?iu)(?:создано с помощью ии|аудио-? или видеоряд был измен[её]н или полностью сгенерирован"
+                    + "|altered or synthetic content|significantly edited or digitally generated"
+                    + "|sound or visuals were significantly edited or digitally generated)"
     );
 
     private static final Pattern AI_DISCLOSURE_JSON_PATTERN = Pattern.compile(
-            "(?i)(?:\"(?:hasSyntheticMedia|isSyntheticMedia|isAlteredOrSynthetic|hasAlteredContent)\"\\s*:\\s*true"
-                    + "|how_this_was_made|altered_content|synthetic_media|altered_or_synthetic"
+            "(?i)(?:\"(?:hasSyntheticMedia|isSyntheticMedia|isAlteredOrSynthetic)\"\\s*:\\s*true"
+                    + "|altered_or_synthetic|synthetic_media"
                     + "|создано с помощью ии|altered or synthetic content)"
     );
 
@@ -1811,8 +1820,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             null,
             "reel_player_overlay",
             "shorts_video_cell",
-            "how_this_was_made",
-            "altered_content",
+            "altered_or_synthetic",
             "synthetic_media",
             "ai_disclosure"
     );
@@ -2353,12 +2361,8 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                 return bytes;
             }
 
-            if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get()) {
-                String descAiSignal = detectAiDisclosureInTextNodes(textNodes);
-                if (descAiSignal != null) {
-                    onAiLabelDetected(videoId, descAiSignal, bytes, null);
-                }
-            }
+            // Description elements can contain "Автодубляж" / "Как это было сделано";
+            // only explicit synthetic-media disclosure should ever mark AI content.
 
             SubtitleScanState state = ensureSubtitleScanStarted(videoId, filter.currentRulesVersion, rules);
             if (state.pending) {
@@ -3643,6 +3647,13 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     && (host.getTextContent() != null || touchHookedBannerHosts.containsKey(host))) {
                 attachBannerTouchHandlerIfNeeded(host);
             }
+            boolean inspectorNow = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_INSPECTOR.get();
+            if (inspectorNow != lastInspectorState) {
+                lastInspectorState = inspectorNow;
+                UiElementInspector.onSettingChanged(inspectorNow);
+            } else if (inspectorNow) {
+                UiElementInspector.syncVisibilityFromLayout();
+            }
             boolean debugEnabled = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_DEBUG.get();
             if (debugEnabled != lastDebugModeState) {
                 lastDebugModeState = debugEnabled;
@@ -4205,8 +4216,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                                                      @Nullable String accessibility) {
         if (path != null) {
             String p = path.toString().toLowerCase(Locale.ROOT);
-            if (p.contains("how_this_was_made") || p.contains("altered_content")
-                    || p.contains("synthetic_media") || p.contains("ai_disclosure")) {
+            if (p.contains("altered_or_synthetic")
+                    || p.contains("synthetic_media")
+                    || p.contains("ai_disclosure")) {
                 return "Метка ИИ";
             }
         }
@@ -4457,23 +4469,30 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             banner.setTag(SHORTS_BANNER_TAG);
             banner.setOrientation(LinearLayout.HORIZONTAL);
             banner.setGravity(Gravity.CENTER_VERTICAL);
-            banner.setPadding(Dim.dp12, Dim.dp8, Dim.dp12, Dim.dp8);
+            banner.setPadding(Dim.dp12, Dim.dp6, Dim.dp12, Dim.dp6);
 
+            // Subtle native YouTube translucent pill (matches Shorts/player overlay chips)
             GradientDrawable bg = new GradientDrawable();
             bg.setShape(GradientDrawable.RECTANGLE);
-            bg.setCornerRadius(Dim.dp(12));
-            bg.setColor(0xE6181818);
-            bg.setStroke(Math.max(2, Dim.dp(1)), isAi ? 0xFFFF9800 : 0xFFEF5350);
+            bg.setCornerRadius(Dim.dp(999));
+            bg.setColor(0x7A000000);
+            bg.setStroke(Math.max(1, Dim.dp(1) / 2), 0x24FFFFFF);
             banner.setBackground(bg);
-            banner.setElevation(Dim.dp8);
+
+            ImageView iconView = new ImageView(activity);
+            iconView.setImageDrawable(new VectorSubtitlesIconDrawable(0xE6FFFFFF));
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(Dim.dp(14), Dim.dp(14));
+            iconLp.setMarginEnd(Dim.dp6);
+            banner.addView(iconView, iconLp);
 
             TextView textView = new TextView(activity);
             textView.setText(message);
-            textView.setTextColor(0xFFFFFFFF);
-            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-            textView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            textView.setMaxLines(2);
+            textView.setTextColor(0xF2FFFFFF);
+            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+            textView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            textView.setSingleLine(true);
             textView.setEllipsize(TextUtils.TruncateAt.END);
+            textView.setIncludeFontPadding(false);
             banner.addView(textView, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -4482,10 +4501,10 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
 
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Dim.dp(28),
                     Gravity.TOP | Gravity.CENTER_HORIZONTAL
             );
-            lp.topMargin = Dim.dp(92);
+            lp.topMargin = Dim.dp(58);
             lp.leftMargin = Dim.dp16;
             lp.rightMargin = Dim.dp16;
             content.addView(banner, lp);
