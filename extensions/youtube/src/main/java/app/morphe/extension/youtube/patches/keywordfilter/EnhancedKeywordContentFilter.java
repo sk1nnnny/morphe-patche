@@ -400,7 +400,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             String matchedText,
             String ruleDisplay,
             @Nullable String videoId,
-            boolean debugMode
+            boolean debugMode,
+            @Nullable String authorName,
+            @Nullable String avatarUrl
     ) {}
 
     private static final int MAX_MATCH_LOG_ENTRIES = 60;
@@ -933,7 +935,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             String videoId = activeVideoId.isEmpty() ? null : activeVideoId;
             List<String> commentTexts = extractCommentTexts(buffer, videoId);
             String componentName = extractRootComponentName(path);
-            String matchedWord = evaluateRulesAndRecord(commentTexts, rules, Source.COMMENTS, videoId, componentName, debug);
+            String matchedWord = evaluateRulesAndRecord(buffer, commentTexts, rules, Source.COMMENTS, videoId, componentName, debug);
 
             CommentDecision decision = new CommentDecision(
                     path.toString(),
@@ -959,7 +961,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
 
         String componentName = extractRootComponentName(path);
         Source source = detectSource(matchedGroup, contextInterface);
-        return evaluateRulesAndRecord(searchableTexts, rules, source, videoId, componentName, debug);
+        return evaluateRulesAndRecord(buffer, searchableTexts, rules, source, videoId, componentName, debug);
     }
 
     private static String extractRootComponentName(@Nullable CharSequence path) {
@@ -971,10 +973,97 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         return dash > 0 ? head.substring(0, dash) : head;
     }
 
+    private static final Pattern SPOKEN_DURATION_PATTERN = Pattern.compile(
+            "^(?:\\d+\\s+(?:час(?:а|ов)?|минут(?:а|ы)?|секунд(?:а|ы)?|hour(?:s)?|minute(?:s)?|second(?:s)?|hr|min|sec)\\s*)+$",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+    );
+
+    private static boolean isSpokenDurationText(@Nullable String s) {
+        if (s == null || s.isEmpty()) return false;
+        String t = s.trim();
+        return isDurationOrBadgeText(t) || SPOKEN_DURATION_PATTERN.matcher(t).matches();
+    }
+
     @Nullable
-    private String evaluateRulesAndRecord(List<String> searchableTexts, List<KeywordRule> rules,
-                                          Source source, @Nullable String videoId,
-                                          String componentName, boolean debug) {
+    private static String extractAvatarUrlFromBuffer(@Nullable byte[] buffer) {
+        if (buffer == null || buffer.length == 0) return null;
+        try {
+            List<ProtoNode> root = ProtoNode.parse(buffer);
+            if (root == null) return null;
+            List<ProtoNode> textNodes = ProtoNode.textNodes(root);
+            for (int i = 0, size = textNodes.size(); i < size; i++) {
+                String t = textNodes.get(i).getText();
+                if (t.startsWith("https://yt3.ggpht.com/")
+                        || t.startsWith("https://yt3.googleusercontent.com/")) {
+                    return t;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    @Nullable
+    private static String extractAuthorFromBufferAndTexts(@Nullable byte[] buffer, Source source,
+                                                          List<String> searchableTexts, String titleText) {
+        if (source == Source.COMMENTS) {
+            if (buffer != null && buffer.length > 0) {
+                try {
+                    List<ProtoNode> root = ProtoNode.parse(buffer);
+                    if (root != null) {
+                        List<ProtoNode> textNodes = ProtoNode.textNodes(root);
+                        for (int i = 0, size = textNodes.size(); i < size; i++) {
+                            String t = textNodes.get(i).getText().trim();
+                            if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60
+                                    && !t.contains(" ") && !t.equals(titleText)) {
+                                return t;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            for (int i = 0, size = searchableTexts.size(); i < size; i++) {
+                String t = searchableTexts.get(i).trim();
+                if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60 && !t.equals(titleText)) {
+                    return t;
+                }
+            }
+            return null;
+        }
+
+        // For videos: look for metadata line ("ChannelName · 12 тыс. просмотров · ...") or @handle
+        for (int i = 0, size = searchableTexts.size(); i < size; i++) {
+            String t = searchableTexts.get(i).trim();
+            if (t.isEmpty() || t.equals(titleText) || isSpokenDurationText(t)) continue;
+            int sep = t.indexOf(" · ");
+            if (sep > 0) {
+                String candidate = t.substring(0, sep).trim();
+                if (!candidate.isEmpty() && !candidate.equals(titleText) && !isSpokenDurationText(candidate)) {
+                    return candidate;
+                }
+            }
+            int bullet = t.indexOf(" • ");
+            if (bullet > 0) {
+                String candidate = t.substring(0, bullet).trim();
+                if (!candidate.isEmpty() && !candidate.equals(titleText) && !isSpokenDurationText(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        for (int i = 0, size = searchableTexts.size(); i < size; i++) {
+            String t = searchableTexts.get(i).trim();
+            if (t.startsWith("@") && t.length() >= 2 && t.length() <= 60 && !t.equals(titleText)) {
+                return t;
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private String evaluateRulesAndRecord(@Nullable byte[] buffer, List<String> searchableTexts,
+                                          List<KeywordRule> rules, Source source,
+                                          @Nullable String videoId, String componentName, boolean debug) {
         if (searchableTexts.isEmpty()) {
             return null;
         }
@@ -987,18 +1076,24 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     MatchDetails detail = matchedClauses.get(j);
                     debugMatchedTextMap.put(detail.matchedText(), detail);
                 }
-                String logText = primary.matchedText();
-                String firstTitle = searchableTexts.get(0);
-                if (source != Source.COMMENTS && !firstTitle.equals(logText)
-                        && !logText.contains(firstTitle)) {
-                    logText = firstTitle + " (" + logText + ")";
+
+                // Pick the cleanest primary title/comment text (never prepend spoken duration or [componentName])
+                String cleanTitle = primary.matchedText().trim();
+                if (source != Source.COMMENTS && isSpokenDurationText(cleanTitle)) {
+                    for (int k = 0, sSize = searchableTexts.size(); k < sSize; k++) {
+                        String cand = searchableTexts.get(k).trim();
+                        if (!cand.isEmpty() && !isSpokenDurationText(cand)) {
+                            cleanTitle = cand;
+                            break;
+                        }
+                    }
                 }
-                if (componentName != null && !componentName.isEmpty()) {
-                    logText = "[" + componentName + "] " + logText;
-                }
-                recordMatchLog(source, primary.matchedWord(), logText,
-                        rule.displayRule, videoId, debug);
-                recordHide(source, videoId, firstTitle);
+
+                String authorName = extractAuthorFromBufferAndTexts(buffer, source, searchableTexts, cleanTitle);
+                String avatarUrl = extractAvatarUrlFromBuffer(buffer);
+                recordMatchLog(source, primary.matchedWord(), cleanTitle,
+                        rule.displayRule, videoId, debug, authorName, avatarUrl);
+                recordHide(source, videoId, cleanTitle);
                 return primary.matchedWord();
             }
         }
@@ -1081,7 +1176,8 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     }
 
     private static void recordMatchLog(Source source, String matchedWord, String matchedText,
-                                       String ruleDisplay, @Nullable String videoId, boolean debugMode) {
+                                       String ruleDisplay, @Nullable String videoId, boolean debugMode,
+                                       @Nullable String authorName, @Nullable String avatarUrl) {
         Logger.printInfo(() -> "[KeywordFilter] " + (debugMode ? "DIMMED" : "HIDDEN")
                 + " | Word: '" + matchedWord + "'"
                 + " | Text: '" + matchedText + "'"
@@ -1110,7 +1206,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     matchedText,
                     ruleDisplay,
                     videoId,
-                    debugMode
+                    debugMode,
+                    authorName,
+                    avatarUrl
             ));
         }
     }
@@ -3334,7 +3432,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             }
 
             if (recorded == null) {
-                recordMatchLog(Source.HOME, matchedWord, cleaned, matchedRuleDisplay, null, true);
+                recordMatchLog(Source.HOME, matchedWord, cleaned, matchedRuleDisplay, null, true, null, null);
             }
 
             SpannableStringBuilder builder = new SpannableStringBuilder(original);
@@ -3902,17 +4000,20 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             badgeBgPaint.setColor(0xD91E1E1E);
             badgeBgPaint.setStyle(Paint.Style.FILL);
             badgeTextPaint.setColor(0xFFFF8A80);
-            badgeTextPaint.setTextSize(10.5f * density);
+            badgeTextPaint.setTextSize(12f * density);
             badgeTextPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
         }
 
         void bind(ComponentHost host, @Nullable DebugRuleSpan span) {
+            // Ensure Android's RenderNode invokes onDrawForeground() so ViewOverlay is always drawn.
+            host.setWillNotDraw(false);
+            // Dim card children directly at RenderNode level (100% ROM-safe) while keeping overlay badge bright.
+            for (int i = 0, count = host.getChildCount(); i < count; i++) {
+                host.getChildAt(i).setAlpha(0.45f);
+            }
             setBounds(0, 0, host.getWidth(), host.getHeight());
-            if (span != null) {
-                String comp = span.componentName() != null && !span.componentName().isEmpty()
-                        ? span.componentName() + " · "
-                        : "";
-                badgeLabel = comp + "«" + span.matchedWord() + "»";
+            if (span != null && span.matchedWord() != null && !span.matchedWord().isEmpty()) {
+                badgeLabel = span.matchedWord();
             }
             if (!added) {
                 host.getOverlay().add(this);
@@ -3923,6 +4024,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
 
         void detach(ComponentHost host) {
+            for (int i = 0, count = host.getChildCount(); i < count; i++) {
+                host.getChildAt(i).setAlpha(1.0f);
+            }
             if (added) {
                 host.getOverlay().remove(this);
                 added = false;

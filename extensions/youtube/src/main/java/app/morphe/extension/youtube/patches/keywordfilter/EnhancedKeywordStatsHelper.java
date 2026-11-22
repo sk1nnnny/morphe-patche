@@ -38,15 +38,21 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.text.NumberFormat;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -60,9 +66,9 @@ import app.morphe.extension.youtube.patches.keywordfilter.EnhancedKeywordContent
 import app.morphe.extension.youtube.settings.Settings;
 
 /**
- * Adds the interactive "Filter match log" row to {@code KeywordContentStatsPreferenceCategory}
- * with a native YouTube-style bottom sheet showing video thumbnails, clean titles, rule badges,
- * filter chips, and full-width action buttons.
+ * Native YouTube-style Filter Match Log bottom sheet:
+ * full video titles, channel names & avatars, comment authors & avatars,
+ * clean non-redundant layout without micro-text or parenthetical clutter.
  */
 @SuppressWarnings({"deprecation", "unused"})
 public final class EnhancedKeywordStatsHelper {
@@ -70,7 +76,10 @@ public final class EnhancedKeywordStatsHelper {
     private static final Pattern COMPONENT_PREFIX_PATTERN =
             Pattern.compile("^\\[[^\\]]+\\]\\s*");
 
-    private static final LruCache<String, Bitmap> thumbnailCache = new LruCache<>(48);
+    private static final LruCache<String, Bitmap> imageCache = new LruCache<>(80);
+
+    private record OEmbedInfo(String title, String authorName) {}
+    private static final Map<String, OEmbedInfo> oEmbedCache = new ConcurrentHashMap<>();
 
     private enum FilterTab {
         ALL, VIDEOS, COMMENTS
@@ -90,14 +99,14 @@ public final class EnhancedKeywordStatsHelper {
             matchLogPref.setSummary(str("morphe_hide_keyword_log_summary", nf.format(logs.size())));
         }
         matchLogPref.setOnPreferenceClickListener(pref -> {
-            showMatchLogSheet(category, matchLogPref, nf);
+            showMatchLogSheet(category, matchLogPref);
             return true;
         });
         category.addPreference(matchLogPref);
     }
 
     @SuppressLint("SetTextI18n")
-    private static void showMatchLogSheet(PreferenceCategory category, Preference matchLogPref, NumberFormat nf) {
+    private static void showMatchLogSheet(PreferenceCategory category, Preference matchLogPref) {
         try {
             Context context = category.getContext();
             List<MatchLogEntry> logs = EnhancedKeywordContentFilter.getRecentMatchLogs();
@@ -115,34 +124,17 @@ public final class EnhancedKeywordStatsHelper {
             SheetBottomDialog.DraggableLinearLayout mainLayout =
                     SheetBottomDialog.createMainLayout(context, bgColor);
 
-            // --- Header row: Title + count pill ---
-            LinearLayout headerRow = new LinearLayout(context);
-            headerRow.setOrientation(LinearLayout.HORIZONTAL);
-            headerRow.setGravity(Gravity.CENTER_VERTICAL);
-            headerRow.setPadding(Dim.dp16, Dim.dp12, Dim.dp16, Dim.dp8);
-
+            // --- Header: clean title only (no duplicate count badge) ---
             TextView titleView = new TextView(context);
             titleView.setText(str("morphe_hide_keyword_log_title"));
             titleView.setTextColor(fgColor);
             titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f);
             titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            headerRow.addView(titleView, new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            titleView.setPadding(Dim.dp16, Dim.dp12, Dim.dp16, Dim.dp8);
+            mainLayout.addView(titleView);
 
-            TextView countBadge = new TextView(context);
-            countBadge.setText(nf.format(logs.size()));
-            countBadge.setTextColor(secondaryTextColor);
-            countBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-            countBadge.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            countBadge.setPadding(Dim.dp10, Dim.dp4, Dim.dp10, Dim.dp4);
-            countBadge.setBackground(roundedRect(chipBgColor, Dim.dp(999)));
-            headerRow.addView(countBadge);
-            mainLayout.addView(headerRow);
-
-            // --- Sheet reference holder ---
             final SheetBottomDialog.SlideDialog[] dialogHolder = new SheetBottomDialog.SlideDialog[1];
 
-            // --- Empty state ---
             if (logs.isEmpty()) {
                 TextView emptyView = new TextView(context);
                 emptyView.setText(str("morphe_hide_keyword_log_empty"));
@@ -168,7 +160,7 @@ public final class EnhancedKeywordStatsHelper {
                 return;
             }
 
-            // --- Filter chips row (All / Videos / Comments) ---
+            // --- Filter chips row ---
             int videoCount = 0;
             int commentCount = 0;
             for (MatchLogEntry e : logs) {
@@ -198,7 +190,6 @@ public final class EnhancedKeywordStatsHelper {
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
             mainLayout.addView(chipsRow);
 
-            // Subtle top divider
             View topDivider = new View(context);
             topDivider.setBackgroundColor(dividerColor);
             mainLayout.addView(topDivider, new LinearLayout.LayoutParams(
@@ -208,7 +199,7 @@ public final class EnhancedKeywordStatsHelper {
             ScrollView scrollView = new ScrollView(context);
             scrollView.setClipToPadding(false);
             scrollView.setVerticalScrollBarEnabled(true);
-            int maxListHeight = Math.round(context.getResources().getDisplayMetrics().heightPixels * 0.56f);
+            int maxListHeight = Math.round(context.getResources().getDisplayMetrics().heightPixels * 0.58f);
             LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, maxListHeight);
 
@@ -240,7 +231,7 @@ public final class EnhancedKeywordStatsHelper {
                             fgColor, secondaryTextColor, cardBgColor, chipBgColor, isRu, dialogHolder);
                     LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                    cardLp.bottomMargin = Dim.dp8;
+                    cardLp.bottomMargin = Dim.dp10;
                     cardsContainer.addView(card, cardLp);
                     shown++;
                 }
@@ -249,7 +240,7 @@ public final class EnhancedKeywordStatsHelper {
                     TextView none = new TextView(context);
                     none.setText(isRu ? "В этой категории записей нет" : "No entries in this category");
                     none.setTextColor(secondaryTextColor);
-                    none.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+                    none.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
                     none.setGravity(Gravity.CENTER);
                     none.setPadding(Dim.dp16, Dim.dp24, Dim.dp16, Dim.dp24);
                     cardsContainer.addView(none);
@@ -261,7 +252,7 @@ public final class EnhancedKeywordStatsHelper {
             chipComments.setOnClickListener(v -> { activeTab[0] = FilterTab.COMMENTS; renderCards.run(); });
             renderCards.run();
 
-            // --- Bottom divider + pinned action bar (Copy | Clear | OK) ---
+            // --- Bottom divider + pinned action bar ---
             View bottomDivider = new View(context);
             bottomDivider.setBackgroundColor(dividerColor);
             mainLayout.addView(bottomDivider, new LinearLayout.LayoutParams(
@@ -273,7 +264,7 @@ public final class EnhancedKeywordStatsHelper {
             footer.setPadding(Dim.dp12, Dim.dp10, Dim.dp12, Dim.dp(14));
 
             Button copyBtn = buildActionButton(context, str("morphe_hide_keyword_log_copy"),
-                    chipBgColor, fgColor, () -> copyAllLogs(context, logs, timeFormat));
+                    chipBgColor, fgColor, () -> copyAllLogs(context, logs, timeFormat, isRu));
             Button clearBtn = buildActionButton(context, str("morphe_hide_keyword_log_clear"),
                     chipBgColor, fgColor, () -> {
                         EnhancedKeywordContentFilter.clearRecentMatchLogs();
@@ -308,22 +299,31 @@ public final class EnhancedKeywordStatsHelper {
                                         boolean isDark, int fgColor, int secondaryTextColor,
                                         int cardBgColor, int pillBgColor, boolean isRu,
                                         SheetBottomDialog.SlideDialog[] dialogHolder) {
-        LinearLayout card = new LinearLayout(context);
-        card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.TOP);
-        card.setPadding(Dim.dp10, Dim.dp10, Dim.dp10, Dim.dp10);
-        card.setBackground(roundedRect(cardBgColor, Dim.dp12));
-
         final boolean hasVideo = entry.source() != Source.COMMENTS
                 && entry.videoId() != null && entry.videoId().length() == 11;
 
+        LinearLayout card = new LinearLayout(context);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(Dim.dp12, Dim.dp12, Dim.dp12, Dim.dp12);
+        card.setBackground(roundedRect(cardBgColor, Dim.dp12));
+
+        String initialText = stripComponentPrefix(entry.matchedText());
+        String initialAuthor = entry.authorName() != null ? entry.authorName().trim() : "";
+        String avatarUrl = entry.avatarUrl();
+        String timeStr = timeFormat.format(new Date(entry.timestampMs()));
+        String sourceLabel = formatSourceLabel(entry.source(), isRu);
+
         if (hasVideo) {
-            // 16:9 rounded YouTube thumbnail with status badge overlay
+            // Top horizontal row: 16:9 thumbnail + full untruncated video title
+            LinearLayout topRow = new LinearLayout(context);
+            topRow.setOrientation(LinearLayout.HORIZONTAL);
+            topRow.setGravity(Gravity.TOP);
+
             FrameLayout thumbFrame = new FrameLayout(context);
-            int thumbW = Dim.dp(124);
-            int thumbH = Dim.dp(70);
+            int thumbW = Dim.dp(128);
+            int thumbH = Dim.dp(72);
             LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(thumbW, thumbH);
-            thumbLp.setMarginEnd(Dim.dp10);
+            thumbLp.setMarginEnd(Dim.dp12);
             thumbFrame.setBackground(roundedRect(isDark ? 0xFF2C2C2C : 0xFFDCDCDC, Dim.dp8));
             thumbFrame.setClipToOutline(true);
             thumbFrame.setOutlineProvider(new ViewOutlineProvider() {
@@ -337,93 +337,75 @@ public final class EnhancedKeywordStatsHelper {
             thumbImage.setScaleType(ImageView.ScaleType.CENTER_CROP);
             thumbFrame.addView(thumbImage, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            loadVideoThumbnailAsync(entry.videoId(), thumbImage);
+            loadImageAsync("https://i.ytimg.com/vi/" + entry.videoId() + "/mqdefault.jpg", thumbImage);
+            topRow.addView(thumbFrame, thumbLp);
 
-            // Status badge in bottom-right of thumbnail (Hidden / Debug)
-            TextView statusBadge = new TextView(context);
-            statusBadge.setText(entry.debugMode()
-                    ? (isRu ? "Отладка" : "Debug")
-                    : (isRu ? "Скрыто" : "Hidden"));
-            statusBadge.setTextColor(0xFFFFFFFF);
-            statusBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
-            statusBadge.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            statusBadge.setPadding(Dim.dp(5), Dim.dp(2), Dim.dp(5), Dim.dp(2));
-            statusBadge.setBackground(roundedRect(
-                    entry.debugMode() ? 0xCCF57C00 : 0xCCD32F2F, Dim.dp4));
-            FrameLayout.LayoutParams badgeLp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                    Gravity.BOTTOM | Gravity.END);
-            badgeLp.setMargins(0, 0, Dim.dp4, Dim.dp4);
-            thumbFrame.addView(statusBadge, badgeLp);
+            // Full video title (no maxLines truncation!)
+            TextView titleTv = new TextView(context);
+            titleTv.setText(buildHighlightedSpannable(initialText, entry.matchedWord()));
+            titleTv.setTextColor(fgColor);
+            titleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+            titleTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            titleTv.setLineSpacing(Dim.dp(2), 1.0f);
+            topRow.addView(titleTv, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-            card.addView(thumbFrame, thumbLp);
-        } else {
-            // Comment / text-only rounded icon badge
-            TextView iconBadge = new TextView(context);
-            iconBadge.setText(entry.source() == Source.COMMENTS ? "💬" : "▶");
-            iconBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f);
-            iconBadge.setGravity(Gravity.CENTER);
-            iconBadge.setBackground(roundedRect(pillBgColor, Dim.dp8));
-            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(Dim.dp36, Dim.dp36);
-            iconLp.setMarginEnd(Dim.dp10);
-            card.addView(iconBadge, iconLp);
-        }
+            card.addView(topRow);
 
-        // Right column: clean highlighted title + metadata + rule pill
-        LinearLayout infoCol = new LinearLayout(context);
-        infoCol.setOrientation(LinearLayout.VERTICAL);
+            // Bottom metadata row: circular channel avatar + channel name + source + time + trigger
+            LinearLayout bottomRow = new LinearLayout(context);
+            bottomRow.setOrientation(LinearLayout.HORIZONTAL);
+            bottomRow.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout.LayoutParams bottomLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            bottomLp.topMargin = Dim.dp10;
 
-        String cleanText = stripComponentPrefix(entry.matchedText());
-        SpannableStringBuilder titleSb = new SpannableStringBuilder();
-        appendHighlightedText(titleSb, cleanText, entry.matchedWord());
+            View avatarView = createCircularAvatarView(context, avatarUrl, initialAuthor, Dim.dp24, pillBgColor, fgColor);
+            LinearLayout.LayoutParams avLp = new LinearLayout.LayoutParams(Dim.dp24, Dim.dp24);
+            avLp.setMarginEnd(Dim.dp8);
+            bottomRow.addView(avatarView, avLp);
 
-        TextView titleTv = new TextView(context);
-        titleTv.setText(titleSb);
-        titleTv.setTextColor(fgColor);
-        titleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
-        titleTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        titleTv.setMaxLines(hasVideo ? 2 : 4);
-        titleTv.setEllipsize(TextUtils.TruncateAt.END);
-        titleTv.setLineSpacing(Dim.dp(2), 1.0f);
-        infoCol.addView(titleTv);
+            LinearLayout metaCol = new LinearLayout(context);
+            metaCol.setOrientation(LinearLayout.VERTICAL);
 
-        // Source + time row
-        String timeStr = timeFormat.format(new Date(entry.timestampMs()));
-        String sourceLabel = formatSourceLabel(entry.source(), isRu);
-        TextView metaTv = new TextView(context);
-        metaTv.setText(sourceLabel + " · " + timeStr);
-        metaTv.setTextColor(secondaryTextColor);
-        metaTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        metaLp.topMargin = Dim.dp4;
-        infoCol.addView(metaTv, metaLp);
+            TextView channelTv = new TextView(context);
+            channelTv.setTextColor(fgColor);
+            channelTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+            channelTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            channelTv.setSingleLine(true);
+            channelTv.setEllipsize(TextUtils.TruncateAt.END);
+            if (!initialAuthor.isEmpty()) {
+                channelTv.setText(initialAuthor);
+                channelTv.setVisibility(View.VISIBLE);
+            } else {
+                channelTv.setVisibility(View.GONE);
+            }
+            metaCol.addView(channelTv);
 
-        // Rule pill
-        String ruleText = (entry.ruleDisplay() != null && !entry.ruleDisplay().isEmpty())
-                ? entry.ruleDisplay()
-                : entry.matchedWord();
-        if (ruleText != null && !ruleText.isEmpty()) {
-            TextView rulePill = new TextView(context);
-            rulePill.setText((isRu ? "Правило: " : "Rule: ") + ruleText);
-            rulePill.setTextColor(isDark ? 0xFFFF8A80 : 0xFFC62828);
-            rulePill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
-            rulePill.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            rulePill.setSingleLine(true);
-            rulePill.setEllipsize(TextUtils.TruncateAt.END);
-            rulePill.setPadding(Dim.dp(6), Dim.dp(2), Dim.dp(6), Dim.dp(2));
-            rulePill.setBackground(roundedRect(isDark ? 0x26EF5350 : 0x1AD32F2F, Dim.dp4));
-            LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            ruleLp.topMargin = Dim.dp4;
-            infoCol.addView(rulePill, ruleLp);
-        }
+            TextView metaTv = new TextView(context);
+            metaTv.setText(sourceLabel + " · " + timeStr);
+            metaTv.setTextColor(secondaryTextColor);
+            metaTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+            metaCol.addView(metaTv);
 
-        card.addView(infoCol, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            bottomRow.addView(metaCol, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        // Tap video card to open directly in YouTube; long-press any card to copy entry
-        if (hasVideo) {
+            // Clean trigger word pill (no regex dump)
+            if (entry.matchedWord() != null && !entry.matchedWord().isEmpty()) {
+                TextView triggerPill = createTriggerPill(context, entry.matchedWord(), isDark);
+                LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                pillLp.setMarginStart(Dim.dp8);
+                bottomRow.addView(triggerPill, pillLp);
+            }
+
+            card.addView(bottomRow, bottomLp);
+
+            // Asynchronously enrich full untruncated video title & exact channel name via YouTube oEmbed
+            enrichVideoWithOEmbedAsync(entry.videoId(), entry.matchedWord(), titleTv, channelTv);
+
+            // Tap to open video in YouTube
             card.setClickable(true);
             card.setFocusable(true);
             card.setOnClickListener(v -> {
@@ -438,14 +420,67 @@ public final class EnhancedKeywordStatsHelper {
                     Logger.printDebug(() -> "Could not open video from match log", ex);
                 }
             });
+        } else {
+            // Comment card: circular author avatar + author name + full comment text + clean footer
+            LinearLayout headerRow = new LinearLayout(context);
+            headerRow.setOrientation(LinearLayout.HORIZONTAL);
+            headerRow.setGravity(Gravity.CENTER_VERTICAL);
+
+            View avatarView = createCircularAvatarView(context, avatarUrl, initialAuthor, Dim.dp(32), pillBgColor, fgColor);
+            LinearLayout.LayoutParams avLp = new LinearLayout.LayoutParams(Dim.dp(32), Dim.dp(32));
+            avLp.setMarginEnd(Dim.dp10);
+            headerRow.addView(avatarView, avLp);
+
+            LinearLayout authorCol = new LinearLayout(context);
+            authorCol.setOrientation(LinearLayout.VERTICAL);
+
+            if (!initialAuthor.isEmpty()) {
+                TextView authorTv = new TextView(context);
+                authorTv.setText(initialAuthor);
+                authorTv.setTextColor(fgColor);
+                authorTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+                authorTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+                authorTv.setSingleLine(true);
+                authorTv.setEllipsize(TextUtils.TruncateAt.END);
+                authorCol.addView(authorTv);
+            }
+
+            TextView metaTv = new TextView(context);
+            metaTv.setText(sourceLabel + " · " + timeStr);
+            metaTv.setTextColor(secondaryTextColor);
+            metaTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+            authorCol.addView(metaTv);
+
+            headerRow.addView(authorCol, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            if (entry.matchedWord() != null && !entry.matchedWord().isEmpty()) {
+                TextView triggerPill = createTriggerPill(context, entry.matchedWord(), isDark);
+                LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                pillLp.setMarginStart(Dim.dp8);
+                headerRow.addView(triggerPill, pillLp);
+            }
+            card.addView(headerRow);
+
+            // Full comment text (no truncation)
+            TextView commentTv = new TextView(context);
+            commentTv.setText(buildHighlightedSpannable(initialText, entry.matchedWord()));
+            commentTv.setTextColor(fgColor);
+            commentTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+            commentTv.setLineSpacing(Dim.dp(2), 1.0f);
+            LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            cLp.topMargin = Dim.dp8;
+            card.addView(commentTv, cLp);
         }
+
+        // Long-press any card to copy detailed entry
         card.setOnLongClickListener(v -> {
-            String copyText = hasVideo
-                    ? cleanText + "\nhttps://youtu.be/" + entry.videoId()
-                    : cleanText;
+            String formatted = formatEntryForCopy(entry, timeFormat, isRu);
             ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
             if (cm != null) {
-                cm.setPrimaryClip(ClipData.newPlainText("KeywordFilterEntry", copyText));
+                cm.setPrimaryClip(ClipData.newPlainText("KeywordFilterEntry", formatted));
                 Utils.showToastShort(str("morphe_hide_keyword_log_copied"));
             }
             return true;
@@ -454,16 +489,121 @@ public final class EnhancedKeywordStatsHelper {
         return card;
     }
 
-    private static void loadVideoThumbnailAsync(String videoId, ImageView target) {
-        target.setTag(videoId);
-        Bitmap cached = thumbnailCache.get(videoId);
+    private static View createCircularAvatarView(Context context, @Nullable String avatarUrl,
+                                                 String authorName, int sizePx, int bgColor, int fgColor) {
+        FrameLayout frame = new FrameLayout(context);
+        frame.setBackground(roundedRect(bgColor, sizePx / 2f));
+        frame.setClipToOutline(true);
+        frame.setOutlineProvider(new ViewOutlineProvider() {
+            @Override
+            public void getOutline(View view, Outline outline) {
+                outline.setOval(0, 0, view.getWidth(), view.getHeight());
+            }
+        });
+
+        String initial = extractInitial(authorName);
+        TextView letterTv = new TextView(context);
+        letterTv.setText(initial);
+        letterTv.setTextColor(fgColor);
+        letterTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizePx >= Dim.dp(30) ? 13f : 11.5f);
+        letterTv.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        letterTv.setGravity(Gravity.CENTER);
+        frame.addView(letterTv, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        if (avatarUrl != null && !avatarUrl.isEmpty()) {
+            ImageView iv = new ImageView(context);
+            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            frame.addView(iv, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            loadImageAsync(avatarUrl, iv);
+        }
+        return frame;
+    }
+
+    private static String extractInitial(@Nullable String name) {
+        if (name == null) return "•";
+        String s = name.trim();
+        if (s.startsWith("@") && s.length() > 1) s = s.substring(1);
+        return s.isEmpty() ? "•" : s.substring(0, 1).toUpperCase(Locale.ROOT);
+    }
+
+    private static TextView createTriggerPill(Context context, String word, boolean isDark) {
+        TextView pill = new TextView(context);
+        pill.setText(word);
+        pill.setTextColor(isDark ? 0xFFFF8A80 : 0xFFC62828);
+        pill.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+        pill.setSingleLine(true);
+        pill.setEllipsize(TextUtils.TruncateAt.END);
+        pill.setMaxWidth(Dim.dp(110));
+        pill.setPadding(Dim.dp8, Dim.dp4, Dim.dp8, Dim.dp4);
+        pill.setBackground(roundedRect(isDark ? 0x29EF5350 : 0x1AD32F2F, Dim.dp6));
+        return pill;
+    }
+
+    private static void enrichVideoWithOEmbedAsync(String videoId, String matchedWord,
+                                                   TextView titleTv, TextView channelTv) {
+        OEmbedInfo cached = oEmbedCache.get(videoId);
+        if (cached != null) {
+            applyOEmbedToViews(cached, matchedWord, titleTv, channelTv);
+            return;
+        }
+        titleTv.setTag(videoId);
+        Utils.runOnBackgroundThread(() -> {
+            try {
+                URL url = new URL("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v="
+                        + videoId + "&format=json");
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(4000);
+                conn.setReadTimeout(4000);
+                if (conn.getResponseCode() == 200) {
+                    StringBuilder sb = new StringBuilder();
+                    try (BufferedReader br = new BufferedReader(
+                            new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                        String line;
+                        while ((line = br.readLine()) != null) sb.append(line);
+                    }
+                    JSONObject json = new JSONObject(sb.toString());
+                    String fullTitle = json.optString("title", "").trim();
+                    String author = json.optString("author_name", "").trim();
+                    if (!fullTitle.isEmpty() || !author.isEmpty()) {
+                        OEmbedInfo info = new OEmbedInfo(fullTitle, author);
+                        oEmbedCache.put(videoId, info);
+                        Utils.runOnMainThread(() -> {
+                            if (videoId.equals(titleTv.getTag())) {
+                                applyOEmbedToViews(info, matchedWord, titleTv, channelTv);
+                            }
+                        });
+                    }
+                }
+                conn.disconnect();
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private static void applyOEmbedToViews(OEmbedInfo info, String matchedWord,
+                                           TextView titleTv, TextView channelTv) {
+        if (!info.title().isEmpty()) {
+            titleTv.setText(buildHighlightedSpannable(info.title(), matchedWord));
+        }
+        if (!info.authorName().isEmpty()) {
+            channelTv.setText(info.authorName());
+            channelTv.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private static void loadImageAsync(String imageUrl, ImageView target) {
+        target.setTag(imageUrl);
+        Bitmap cached = imageCache.get(imageUrl);
         if (cached != null) {
             target.setImageBitmap(cached);
             return;
         }
         Utils.runOnBackgroundThread(() -> {
             try {
-                URL url = new URL("https://i.ytimg.com/vi/" + videoId + "/mqdefault.jpg");
+                URL url = new URL(imageUrl);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(4000);
                 conn.setReadTimeout(4000);
@@ -471,9 +611,9 @@ public final class EnhancedKeywordStatsHelper {
                     try (InputStream is = conn.getInputStream()) {
                         Bitmap bmp = BitmapFactory.decodeStream(is);
                         if (bmp != null) {
-                            thumbnailCache.put(videoId, bmp);
+                            imageCache.put(imageUrl, bmp);
                             Utils.runOnMainThread(() -> {
-                                if (videoId.equals(target.getTag())) {
+                                if (imageUrl.equals(target.getTag())) {
                                     target.setImageBitmap(bmp);
                                 }
                             });
@@ -486,31 +626,63 @@ public final class EnhancedKeywordStatsHelper {
         });
     }
 
-    private static void copyAllLogs(Context context, List<MatchLogEntry> logs, SimpleDateFormat timeFormat) {
-        StringBuilder plainText = new StringBuilder();
+    private static void copyAllLogs(Context context, List<MatchLogEntry> logs,
+                                    SimpleDateFormat timeFormat, boolean isRu) {
+        StringBuilder sb = new StringBuilder();
         for (int i = 0, size = logs.size(); i < size; i++) {
-            MatchLogEntry entry = logs.get(i);
-            if (i > 0) plainText.append("\n\n");
-            String timeStr = timeFormat.format(new Date(entry.timestampMs()));
-            plainText.append(i + 1).append(". [")
-                    .append(entry.source().name()).append(" • ").append(timeStr).append("] ")
-                    .append(stripComponentPrefix(entry.matchedText()))
-                    .append(" («").append(entry.matchedWord()).append("»)");
-            if (entry.videoId() != null && entry.videoId().length() == 11) {
-                plainText.append(" https://youtu.be/").append(entry.videoId());
-            }
+            if (i > 0) sb.append("\n\n");
+            sb.append(i + 1).append(". ").append(formatEntryForCopy(logs.get(i), timeFormat, isRu));
         }
         ClipboardManager cm = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
         if (cm != null) {
-            cm.setPrimaryClip(ClipData.newPlainText("KeywordFilterLog", plainText.toString()));
+            cm.setPrimaryClip(ClipData.newPlainText("KeywordFilterLog", sb.toString()));
             Utils.showToastShort(str("morphe_hide_keyword_log_copied"));
         }
+    }
+
+    private static String formatEntryForCopy(MatchLogEntry entry, SimpleDateFormat timeFormat, boolean isRu) {
+        StringBuilder sb = new StringBuilder();
+        String timeStr = timeFormat.format(new Date(entry.timestampMs()));
+        String sourceLabel = formatSourceLabel(entry.source(), isRu);
+        String statusLabel = entry.debugMode()
+                ? (isRu ? "Отладка" : "Debug")
+                : (isRu ? "Скрыто" : "Hidden");
+
+        String title = stripComponentPrefix(entry.matchedText());
+        String author = entry.authorName() != null ? entry.authorName().trim() : "";
+        if (entry.videoId() != null) {
+            OEmbedInfo info = oEmbedCache.get(entry.videoId());
+            if (info != null) {
+                if (!info.title().isEmpty()) title = info.title();
+                if (!info.authorName().isEmpty()) author = info.authorName();
+            }
+        }
+
+        sb.append(sourceLabel).append(" · ").append(timeStr).append(" · ").append(statusLabel);
+        sb.append('\n').append(title);
+        if (!author.isEmpty()) {
+            sb.append('\n').append(entry.source() == Source.COMMENTS
+                    ? (isRu ? "Автор: " : "Author: ")
+                    : (isRu ? "Канал: " : "Channel: "))
+                    .append(author);
+        }
+        if (entry.matchedWord() != null && !entry.matchedWord().isEmpty()) {
+            sb.append('\n').append(isRu ? "Триггер: " : "Trigger: ").append(entry.matchedWord());
+        }
+        if (entry.ruleDisplay() != null && !entry.ruleDisplay().isEmpty()
+                && !entry.ruleDisplay().equals(entry.matchedWord())) {
+            sb.append('\n').append(isRu ? "Правило: " : "Rule: ").append(entry.ruleDisplay());
+        }
+        if (entry.videoId() != null && entry.videoId().length() == 11) {
+            sb.append("\nhttps://youtu.be/").append(entry.videoId());
+        }
+        return sb.toString();
     }
 
     private static TextView createFilterChip(Context context, String label) {
         TextView chip = new TextView(context);
         chip.setText(label);
-        chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
         chip.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         chip.setPadding(Dim.dp12, Dim.dp6, Dim.dp12, Dim.dp6);
         chip.setSingleLine(true);
@@ -571,7 +743,13 @@ public final class EnhancedKeywordStatsHelper {
         };
     }
 
-    private static void appendHighlightedText(SpannableStringBuilder sb, String text, String word) {
+    private static SpannableStringBuilder buildHighlightedSpannable(String text, @Nullable String word) {
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        appendHighlightedText(sb, text, word);
+        return sb;
+    }
+
+    private static void appendHighlightedText(SpannableStringBuilder sb, String text, @Nullable String word) {
         int base = sb.length();
         sb.append(text);
         if (word == null || word.isEmpty()) return;
