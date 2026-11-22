@@ -972,36 +972,33 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
 
         String videoId = extractVideoIdFromBuffer(buffer);
-        String effectiveVideoId = (videoId != null && !videoId.isEmpty())
-                ? videoId
-                : VideoInformation.getStartingOrPlayingVideoId();
-
-        // Check AI-labeled disclosure in Shorts overlay / feed cards
         boolean isShortsOverlay = (matchedGroup == shortsOverlayFilter);
+
+        // Only use the buffer's OWN explicit videoId so prefetched neighbor Shorts NEVER
+        // contaminate or skip the currently playing Short!
         if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get()) {
             String aiSignal = detectAiDisclosureInBuffer(buffer, path, accessibility);
             if (aiSignal != null) {
-                if (effectiveVideoId != null && !effectiveVideoId.isEmpty()) {
-                    onAiLabelDetected(effectiveVideoId, aiSignal, buffer, accessibility);
+                if (videoId != null && !videoId.isEmpty()) {
+                    onAiLabelDetected(videoId, aiSignal, buffer, accessibility);
                 }
                 if (!isShortsOverlay) {
-                    // Feed/channel/search card marked as AI: hide in normal mode, keep in debug mode
-                    List<String> texts = extractSearchableTexts(buffer, accessibility, effectiveVideoId);
+                    List<String> texts = extractSearchableTexts(buffer, accessibility, videoId);
                     String title = texts.isEmpty() ? aiSignal : texts.get(0);
                     String[] meta = extractAuthorAndAvatarSinglePass(buffer, Source.HOME, texts, title);
                     recordMatchLog(detectSource(matchedGroup, contextInterface), "ИИ", title,
-                            aiSignal, effectiveVideoId, debug, meta[0], meta[1]);
+                            aiSignal, videoId, debug, meta[0], meta[1]);
                     return "ИИ";
                 }
             }
         }
 
         if (isShortsOverlay) {
-            // Never hide the Shorts player overlay itself via Litho filtering; instead evaluate
-            // Shorts title/handle rules and trigger pause/skip/indicator cleanly.
-            if (effectiveVideoId != null && !effectiveVideoId.isEmpty()) {
-                List<String> overlayTexts = extractSearchableTexts(buffer, accessibility, effectiveVideoId);
-                evaluateShortsMetadataTriggers(effectiveVideoId, overlayTexts, rules, buffer);
+            // Only evaluate Shorts overlay metadata when the buffer carries its own explicit videoId
+            // (prevents prefetched Shorts from triggering on the currently playing Short).
+            if (videoId != null && !videoId.isEmpty()) {
+                List<String> overlayTexts = extractSearchableTexts(buffer, accessibility, videoId);
+                evaluateShortsMetadataTriggers(videoId, overlayTexts, rules, buffer);
             }
             return null;
         }
@@ -3493,6 +3490,17 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
 
             String rawStr = original.toString();
 
+            // 0. Record every Litho text element when UI Element Inspector is enabled
+            if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_INSPECTOR.get() && contextInterface != null) {
+                String trimmed = rawStr.trim();
+                if (!trimmed.isEmpty()) {
+                    CharSequence pathBuilder = contextInterface.patch_getPathBuilder();
+                    String id = extractRootComponentName(pathBuilder);
+                    UiElementInspector.recordLithoComponent(
+                            id, pathBuilder, null, Collections.singletonList(trimmed));
+                }
+            }
+
             // 1. If this text contains the subtitle banner markers, decorate it with native pills & clickable spans
             if (rawStr.contains(SUBTITLE_BANNER_START_MARKER)) {
                 SpannableString spanned = original instanceof SpannableString ss
@@ -4247,8 +4255,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             if (AI_DISCLOSURE_TEXT_PATTERN.matcher(t).find()) {
                 return "Метка ИИ";
             }
-            // Exact Shorts pill badge text: "ИИ" or "AI" next to info icon in reel_player_overlay
-            if ("ИИ".equals(t) || "AI".equals(t) || "Altered or synthetic".equalsIgnoreCase(t)) {
+            if ("Altered or synthetic".equalsIgnoreCase(t)) {
                 return "Метка ИИ";
             }
         }
@@ -4360,9 +4367,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             if (!ShortsPlayerState.isOpen()) {
                 return;
             }
-            String currentId = VideoInformation.getStartingOrPlayingVideoId();
-            if (currentId.isEmpty()) currentId = activeChipVideoId;
-            if (!videoId.equals(currentId)) {
+            String playingId = VideoInformation.getVideoId();
+            if (playingId.isEmpty()) playingId = VideoInformation.getStartingOrPlayingVideoId();
+            if (playingId.isEmpty() || !videoId.equals(playingId)) {
                 return;
             }
 

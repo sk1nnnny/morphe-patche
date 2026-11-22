@@ -365,12 +365,37 @@ public final class UiElementInspector {
 
         @Nullable
         private View findDeepestViewAt(View node, float rawX, float rawY) {
+            List<View> hits = new ArrayList<>();
+            collectHitViews(node, rawX, rawY, hits);
+            if (hits.isEmpty()) return null;
+
+            // Pick the smallest (most specific) visible view at (rawX, rawY),
+            // preferring views that actually contain text, contentDescription, or a resource ID.
+            View best = null;
+            long bestScore = Long.MAX_VALUE;
+            for (int i = 0, size = hits.size(); i < size; i++) {
+                View v = hits.get(i);
+                long area = (long) Math.max(1, v.getWidth()) * Math.max(1, v.getHeight());
+                boolean hasUsefulInfo = hasInspectableInfo(v);
+                long score = hasUsefulInfo ? area : (area + 10_000_000L);
+                if (best == null || score < bestScore) {
+                    best = v;
+                    bestScore = score;
+                }
+            }
+            return best;
+        }
+
+        private void collectHitViews(View node, float rawX, float rawY, List<View> out) {
             if (node == this || node.getVisibility() != View.VISIBLE) {
-                return null;
+                return;
+            }
+            if (node.getWidth() <= 0 || node.getHeight() <= 0) {
+                return;
             }
             Object tag = node.getTag();
             if (FAB_TAG.equals(tag) || OVERLAY_TAG.equals(tag)) {
-                return null;
+                return;
             }
             node.getLocationOnScreen(locBuf);
             int l = locBuf[0];
@@ -378,17 +403,30 @@ public final class UiElementInspector {
             int r = l + node.getWidth();
             int b = t + node.getHeight();
             if (rawX < l || rawX > r || rawY < t || rawY > b) {
-                return null;
+                return;
             }
             if (node instanceof ViewGroup vg) {
                 for (int i = vg.getChildCount() - 1; i >= 0; i--) {
-                    View hit = findDeepestViewAt(vg.getChildAt(i), rawX, rawY);
-                    if (hit != null) {
-                        return hit;
-                    }
+                    collectHitViews(vg.getChildAt(i), rawX, rawY, out);
                 }
             }
-            return node;
+            out.add(node);
+        }
+
+        private boolean hasInspectableInfo(View v) {
+            if (v.getContentDescription() != null && v.getContentDescription().length() > 0) {
+                return true;
+            }
+            if (v instanceof TextView tv && tv.getText() != null && tv.getText().length() > 0) {
+                return true;
+            }
+            if (v instanceof ComponentHost host) {
+                TextContent tc = host.getTextContent();
+                if (tc != null && !tc.getTextItems().isEmpty()) {
+                    return true;
+                }
+            }
+            return v.getId() != View.NO_ID && v.getId() != 0;
         }
     }
 
@@ -523,11 +561,22 @@ public final class UiElementInspector {
             }
         }
 
-        // Match against recent Litho buffers using extracted text or contentDescription
+        // Also collect texts from immediate parent if target itself had no texts
+        if (collectedTexts.isEmpty() && target.getParent() instanceof View parentView) {
+            collectTextsFromViewTree(parentView, collectedTexts);
+            if (!collectedTexts.isEmpty()) {
+                sb.append("\nParent Texts:\n");
+                for (int i = 0; i < Math.min(collectedTexts.size(), 10); i++) {
+                    sb.append("- ").append(collectedTexts.get(i)).append('\n');
+                }
+            }
+        }
+
+        // Match against recent Litho components (captured from all Litho text elements & buffers)
         List<LithoRecord> matchedLitho = findMatchingLithoRecords(collectedTexts, desc);
         if (!matchedLitho.isEmpty()) {
-            sb.append("\nLitho Components:\n");
-            for (int i = 0; i < Math.min(matchedLitho.size(), 4); i++) {
+            sb.append("\nMatched Litho Components:\n");
+            for (int i = 0; i < Math.min(matchedLitho.size(), 6); i++) {
                 LithoRecord rec = matchedLitho.get(i);
                 if (!rec.identifier().isEmpty()) {
                     sb.append("Identifier: ").append(rec.identifier()).append('\n');
@@ -535,8 +584,20 @@ public final class UiElementInspector {
                 if (!rec.path().isEmpty()) {
                     sb.append("Path: ").append(rec.path()).append('\n');
                 }
-                if (!rec.accessibility().isEmpty()) {
-                    sb.append("A11y: ").append(rec.accessibility()).append('\n');
+                if (!rec.texts().isEmpty()) {
+                    sb.append("Text: ").append(rec.texts().get(0)).append('\n');
+                }
+                sb.append('\n');
+            }
+        } else {
+            // Fallback: list the most recent unique Litho elements rendered on screen
+            List<LithoRecord> recent = getRecentUniqueLithoRecords(8);
+            if (!recent.isEmpty()) {
+                sb.append("\nRecent Screen Litho Elements:\n");
+                for (LithoRecord rec : recent) {
+                    String txt = rec.texts().isEmpty() ? "" : (" -> " + rec.texts().get(0));
+                    sb.append("- ").append(rec.path().isEmpty() ? rec.identifier() : rec.path())
+                            .append(txt).append('\n');
                 }
                 sb.append('\n');
             }
@@ -585,6 +646,22 @@ public final class UiElementInspector {
                 collectTextsFromViewTree(vg.getChildAt(i), out);
             }
         }
+    }
+
+    private static List<LithoRecord> getRecentUniqueLithoRecords(int limit) {
+        List<LithoRecord> out = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        synchronized (recentLithoRecords) {
+            for (LithoRecord rec : recentLithoRecords) {
+                String txt = rec.texts().isEmpty() ? "" : rec.texts().get(0);
+                String key = rec.path() + "|" + txt;
+                if (seen.add(key)) {
+                    out.add(rec);
+                    if (out.size() >= limit) break;
+                }
+            }
+        }
+        return out;
     }
 
     private static List<LithoRecord> findMatchingLithoRecords(List<String> texts, @Nullable CharSequence desc) {
