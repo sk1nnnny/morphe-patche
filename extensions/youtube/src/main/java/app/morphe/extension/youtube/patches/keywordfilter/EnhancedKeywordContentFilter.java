@@ -846,7 +846,25 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         VideoInformation.onVideoIdChange.addObserver(EnhancedKeywordContentFilter::onVideoIdLoaded);
         ShortsPlayerState.getOnChange().addObserver(isOpen -> {
             if (!Boolean.TRUE.equals(isOpen)) {
+                pendingPauseShortVideoId = "";
                 Utils.runOnMainThread(EnhancedKeywordContentFilter::dismissShortsAlertBanner);
+            }
+        });
+        VideoState.getOnChange().addObserver(vs -> {
+            if (vs == VideoState.PLAYING && ShortsPlayerState.isOpen()) {
+                String pending = pendingPauseShortVideoId;
+                if (!pending.isEmpty()) {
+                    String current = VideoInformation.getVideoId();
+                    if (current.isEmpty()) current = VideoInformation.getStartingOrPlayingVideoId();
+                    if (pending.equals(current)) {
+                        pendingPauseShortVideoId = "";
+                        Utils.runOnMainThreadDelayed(() -> {
+                            if (ShortsPlayerState.isOpen() && VideoState.getCurrent() == VideoState.PLAYING) {
+                                dispatchShortsCenterTapPause();
+                            }
+                        }, 120);
+                    }
+                }
             }
         });
     }
@@ -1796,6 +1814,14 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
     private static final String SHORTS_BANNER_TAG = "morphe_shorts_keyword_banner";
     private static volatile String lastPausedShortVideoId = "";
     private static volatile String lastSkippedShortVideoId = "";
+    private static volatile String pendingPauseShortVideoId = "";
+
+    /** Exact ContentDescription used by YouTube's official Shorts AI disclosure badge ("ИИ: контент создан с помощью ИИ"). */
+    private static final Pattern AI_BADGE_CONTENT_DESC_PATTERN = Pattern.compile(
+            "(?iu)(?:контент создан с помощью ии|создано с помощью ии"
+                    + "|altered or synthetic content|significantly edited or digitally generated"
+                    + "|ai[- ]generated content|synthetic media)"
+    );
 
     /** Video IDs detected as having YouTube's AI / synthetic content disclosure label. */
     private static final Map<String, String> aiLabeledVideoSignals =
@@ -1869,6 +1895,7 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
             }
             activeChipVideoId = videoId;
             activeChipClickIndex = 0;
+            pendingPauseShortVideoId = "";
             Utils.runOnMainThread(() -> {
                 updatePlayerOverlayChip();
                 dismissShortsAlertBanner();
@@ -3655,6 +3682,9 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
                     && (host.getTextContent() != null || touchHookedBannerHosts.containsKey(host))) {
                 attachBannerTouchHandlerIfNeeded(host);
             }
+            if (KeywordFilterSettings.HIDE_KEYWORD_CONTENT_HIDE_AI.get() && ShortsPlayerState.isOpen()) {
+                checkVisibleShortsAiBadge(host);
+            }
             boolean inspectorNow = KeywordFilterSettings.HIDE_KEYWORD_CONTENT_INSPECTOR.get();
             if (inspectorNow != lastInspectorState) {
                 lastInspectorState = inspectorNow;
@@ -4433,21 +4463,105 @@ public final class EnhancedKeywordContentFilter extends EnhancedBufferPhraseFilt
         }
     }
 
+    private static void checkVisibleShortsAiBadge(ComponentHost host) {
+        CharSequence cd = host.getContentDescription();
+        if (cd == null || cd.length() < 6) {
+            return;
+        }
+        if (!AI_BADGE_CONTENT_DESC_PATTERN.matcher(cd).find()) {
+            return;
+        }
+        // Only trigger if this badge is actually visible on screen (never off-screen prefetched Shorts!)
+        if (!host.isAttachedToWindow() || !host.isShown() || !isViewVisibleOnScreen(host)) {
+            return;
+        }
+        String playingId = VideoInformation.getVideoId();
+        if (playingId.isEmpty()) playingId = VideoInformation.getStartingOrPlayingVideoId();
+        if (playingId.isEmpty()) playingId = activeChipVideoId;
+        if (playingId == null || playingId.isEmpty()) {
+            return;
+        }
+        if (!aiLabeledVideoSignals.containsKey(playingId)) {
+            onAiLabelDetected(playingId, "Метка ИИ", null, cd.toString());
+        }
+    }
+
+    private static boolean isViewVisibleOnScreen(View view) {
+        if (view.getWidth() <= 0 || view.getHeight() <= 0) {
+            return false;
+        }
+        int[] loc = new int[2];
+        view.getLocationOnScreen(loc);
+        android.util.DisplayMetrics dm = view.getResources().getDisplayMetrics();
+        return loc[0] + view.getWidth() > 0 && loc[0] < dm.widthPixels
+                && loc[1] + view.getHeight() > 0 && loc[1] < dm.heightPixels;
+    }
+
     private static void pauseCurrentPlayback() {
         try {
-            if (VideoState.getCurrent() != VideoState.PLAYING) {
+            String videoId = VideoInformation.getVideoId();
+            if (videoId.isEmpty()) videoId = VideoInformation.getStartingOrPlayingVideoId();
+            if (videoId.isEmpty()) videoId = activeChipVideoId;
+
+            VideoState state = VideoState.getCurrent();
+            if (state == VideoState.PAUSED || state == VideoState.ENDED) {
                 return;
             }
-            Context ctx = Utils.getContext();
-            if (ctx == null) return;
-            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                final long now = SystemClock.uptimeMillis();
-                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
-                am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
+            if (state != VideoState.PLAYING) {
+                // Player is still buffering/initializing: pause the instant it enters PLAYING
+                if (videoId != null && !videoId.isEmpty()) {
+                    pendingPauseShortVideoId = videoId;
+                }
+                return;
             }
+            dispatchShortsCenterTapPause();
         } catch (Exception ex) {
             Logger.printDebug(() -> "pauseCurrentPlayback failure", ex);
+        }
+    }
+
+    /**
+     * Pauses the active Short reliably across all YouTube versions and Android ROMs by dispatching
+     * a single clean tap at the upper-center of the Shorts video surface (outside all overlay controls),
+     * with a media-key fallback. Only called when VideoState == PLAYING.
+     */
+    private static void dispatchShortsCenterTapPause() {
+        try {
+            if (!ShortsPlayerState.isOpen() || VideoState.getCurrent() != VideoState.PLAYING) {
+                return;
+            }
+            Activity activity = Utils.getActivity();
+            if (activity != null && !activity.isFinishing() && activity.getWindow() != null) {
+                View decor = activity.getWindow().getDecorView();
+                int w = decor.getWidth();
+                int h = decor.getHeight();
+                if (w > 0 && h > 0) {
+                    float tapX = w * 0.50f;
+                    float tapY = h * 0.36f;
+                    long downTime = SystemClock.uptimeMillis();
+                    MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, tapX, tapY, 0);
+                    MotionEvent up = MotionEvent.obtain(downTime, downTime + 40, MotionEvent.ACTION_UP, tapX, tapY, 0);
+                    try {
+                        decor.dispatchTouchEvent(down);
+                        decor.dispatchTouchEvent(up);
+                    } finally {
+                        down.recycle();
+                        up.recycle();
+                    }
+                    return;
+                }
+            }
+            Context ctx = Utils.getContext();
+            if (ctx != null) {
+                AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+                if (am != null) {
+                    final long now = SystemClock.uptimeMillis();
+                    am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
+                    am.dispatchMediaKeyEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE, 0));
+                }
+            }
+        } catch (Exception ex) {
+            Logger.printDebug(() -> "dispatchShortsCenterTapPause failure", ex);
         }
     }
 
